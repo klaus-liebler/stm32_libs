@@ -8,12 +8,13 @@
 
 #pragma once
 
-// TODO(stm32_libs H5 port): this PHY talks to the UCPD peripheral via the STM32G4 LL API
-// (LL_UCPD_*, DMA channel/request names, CC1/CC2 pin mapping). STM32H5 also has a UCPD
-// peripheral, but the LL API details and pin mapping need to be re-verified against H5
-// hardware before enabling this for STM32H5xx - not done as part of the stm32_libs
-// consolidation/monorepo migration.
-#if defined(STM32G0xx) || defined(STM32G4xx)
+// STM32H5 support: the UCPD1 LL API (LL_UCPD_*) is essentially identical to STM32G4's,
+// but the DMA controller behind it is not - STM32H5 uses GPDMA (different
+// LL_DMA_InitTypeDef layout, GPDMA1/2 instances, LL_GPDMA1_REQUEST_UCPD1_RX/TX request
+// IDs) instead of STM32G4's classic DMA1+DMAMUX. CC1/CC2 pin mapping for STM32H5
+// (PB13/PB14) verified against firmware_control_unit_ethercat's CubeMX-generated
+// MX_UCPD1_Init(). Not yet verified on real H5 hardware - please test before relying on it.
+#if defined(STM32G0xx) || defined(STM32G4xx) || defined(STM32H5xx)
 
 #include "PDPhy.h"
 

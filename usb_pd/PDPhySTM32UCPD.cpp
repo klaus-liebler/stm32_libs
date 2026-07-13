@@ -6,19 +6,29 @@
 // https://opensource.org/licenses/MIT
 //
 
-// TODO(stm32_libs H5 port): see PDPhySTM32UCPD.h - stays STM32G4-only until the H5 UCPD
-// LL API / DMA / CC1-CC2 pin mapping has been verified against real H5 hardware.
-#if defined(STM32G0xx) || defined(STM32G4xx)
+#if defined(STM32G0xx) || defined(STM32G4xx) || defined(STM32H5xx)
 
+#if defined(STM32H5xx)
+#include "stm32h5xx_ll_bus.h"
+#include "stm32h5xx_ll_dma.h"
+#include "stm32h5xx_ll_gpio.h"
+#include "stm32h5xx_ll_pwr.h"
+#include "stm32h5xx_ll_ucpd.h"
+#include "stm32h5xx_ll_system.h"
+#else
 #include "stm32g4xx_ll_bus.h"
 #include "stm32g4xx_ll_dma.h"
 #include "stm32g4xx_ll_gpio.h"
 #include "stm32g4xx_ll_pwr.h"
 #include "stm32g4xx_ll_ucpd.h"
 #include "stm32g4xx_ll_system.h"
+#endif
 #include "PDController.h"
 #include "PDPhySTM32UCPD.h"
 
+// STM32H5 uses the GPDMA controller (different LL_DMA_InitTypeDef layout/API than
+// STM32G4's classic DMA1+DMAMUX) - see the two LL_DMA_InitTypeDef blocks in init() below,
+// and the DMA_RX/TX runtime access helpers further down, which are also family-conditional.
 #if defined(STM32G4xx)
     // STM32G4 family: CC1 -> PB6, CC2 -> PB4
     #define GPIO_CC1 GPIOB
@@ -42,6 +52,19 @@
     #define DMA_TX DMA1
     #define DMA_CHANNEL_TX LL_DMA_CHANNEL_2
     #define UCPD_IRQ UCPD1_2_IRQn
+
+#elif defined(STM32H5xx)
+    // STM32H5 family: CC1 -> PB13, CC2 -> PB14 (verified against
+    // firmware_control_unit_ethercat's CubeMX-generated MX_UCPD1_Init())
+    #define GPIO_CC1 GPIOB
+    #define PIN_CC1 LL_GPIO_PIN_13
+    #define GPIO_CC2 GPIOB
+    #define PIN_CC2 LL_GPIO_PIN_14
+    #define DMA_RX GPDMA1
+    #define DMA_CHANNEL_RX LL_DMA_CHANNEL_0
+    #define DMA_TX GPDMA1
+    #define DMA_CHANNEL_TX LL_DMA_CHANNEL_1
+    #define UCPD_IRQ UCPD1_IRQn
 #endif
 
 
@@ -59,16 +82,22 @@ void PDPhy::initSink() {
 
 void PDPhySTM32UCPD::init(bool isMonitor) {
     // clocks
-    LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
-    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_CRC);
-    LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMA1);
-    #if defined(STM32G4xx)
-        LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMAMUX1);
+    #if defined(STM32H5xx)
+        // STM32H5's PWR clock is always on (not gateable, no LL_APB1_GRP1_PERIPH_PWR)
+        LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_CRC);
+        LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1); // GPDMA has no separate mux clock
     #else
-        LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);
+        LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
+        LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_CRC);
+        LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMA1);
+        #if defined(STM32G4xx)
+            LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_DMAMUX1);
+        #else
+            LL_APB2_GRP1_EnableClock(LL_APB2_GRP1_PERIPH_SYSCFG);
+        #endif
     #endif
 
-    #if defined(STM32G4xx)
+    #if defined(STM32G4xx) || defined(STM32H5xx)
         LL_AHB2_GRP1_EnableClock(LL_AHB2_GRP1_PERIPH_GPIOB);
     #elif defined(STM32G0xx)
         LL_IOP_GRP1_EnableClock(LL_IOP_GRP1_PERIPH_GPIOA);
@@ -100,6 +129,38 @@ void PDPhySTM32UCPD::init(bool isMonitor) {
     };
     LL_GPIO_Init(GPIO_CC2, &pinCc2Init);
 
+#if defined(STM32H5xx)
+    // STM32H5 GPDMA: different LL_DMA_InitTypeDef layout than STM32G4's classic DMA.
+    // Start from ST's own defaults (LL_DMA_StructInit) and only override what this
+    // simple single-block byte transfer actually needs - the newer GPDMA struct has many
+    // additional fields (linked-list, trigger, port allocation, ...) whose defaults are
+    // already correct for a plain non-triggered, non-linked transfer.
+    LL_DMA_InitTypeDef rxDmaInit;
+    LL_DMA_StructInit(&rxDmaInit);
+    rxDmaInit.SrcAddress = (uint32_t)&UCPD1->RXDR;
+    rxDmaInit.Direction = LL_DMA_DIRECTION_PERIPH_TO_MEMORY;
+    rxDmaInit.SrcIncMode = LL_DMA_SRC_FIXED;
+    rxDmaInit.DestIncMode = LL_DMA_DEST_INCREMENT;
+    rxDmaInit.SrcDataWidth = LL_DMA_SRC_DATAWIDTH_BYTE;
+    rxDmaInit.DestDataWidth = LL_DMA_DEST_DATAWIDTH_BYTE;
+    rxDmaInit.Request = LL_GPDMA1_REQUEST_UCPD1_RX;
+    rxDmaInit.Priority = LL_DMA_LOW_PRIORITY_LOW_WEIGHT;
+    LL_DMA_Init(DMA_RX, DMA_CHANNEL_RX, &rxDmaInit);
+
+    if (!isMonitor) {
+        LL_DMA_InitTypeDef txDmaInit;
+        LL_DMA_StructInit(&txDmaInit);
+        txDmaInit.DestAddress = (uint32_t)&UCPD1->TXDR;
+        txDmaInit.Direction = LL_DMA_DIRECTION_MEMORY_TO_PERIPH;
+        txDmaInit.SrcIncMode = LL_DMA_SRC_INCREMENT;
+        txDmaInit.DestIncMode = LL_DMA_DEST_FIXED;
+        txDmaInit.SrcDataWidth = LL_DMA_SRC_DATAWIDTH_BYTE;
+        txDmaInit.DestDataWidth = LL_DMA_DEST_DATAWIDTH_BYTE;
+        txDmaInit.Request = LL_GPDMA1_REQUEST_UCPD1_TX;
+        txDmaInit.Priority = LL_DMA_LOW_PRIORITY_LOW_WEIGHT;
+        LL_DMA_Init(DMA_TX, DMA_CHANNEL_TX, &txDmaInit);
+    }
+#else
     // configure DMA for USB PD RX
     LL_DMA_InitTypeDef rxDmaInit = {
         .PeriphOrM2MSrcAddress = (uint32_t)&UCPD1->RXDR,
@@ -133,8 +194,9 @@ void PDPhySTM32UCPD::init(bool isMonitor) {
         };
         LL_DMA_Init(DMA_TX, DMA_CHANNEL_TX, &txDmaInit);
     }
+#endif
 
-    #if defined(STM32G4xx)
+    #if defined(STM32G4xx) || defined(STM32H5xx)
         // turn off dead battery detection
         LL_PWR_DisableUCPDDeadBattery();
     #endif
@@ -168,6 +230,10 @@ void PDPhySTM32UCPD::init(bool isMonitor) {
     // same interrupt priority as scheduler timer so they don't interrupt each other (code is not re-entrant)
     #if defined(STM32G4xx)
         constexpr IRQn_Type schedulerIrq = TIM7_DAC_IRQn;
+    #elif defined(STM32H5xx)
+        // matches TaskScheduler.cpp's active USE_TIMER7_FOR_SCHEDULER config (TIM7_IRQn on H5,
+        // no _DAC suffix - see the NOTE next to USE_TIMER6_FOR_SCHEDULER if that's switched)
+        constexpr IRQn_Type schedulerIrq = TIM7_IRQn;
     #elif defined(STM32L4xx)
         constexpr IRQn_Type schedulerIrq = TIM7_IRQn;
     #elif defined(STM32G0xx)
@@ -190,16 +256,26 @@ void PDPhy::prepareRead(PDMessage* msg) {
 
 void PDPhySTM32UCPD::enableRead() {
     // enable RX DMA
-    LL_DMA_SetMemoryAddress(DMA_RX, DMA_CHANNEL_RX, reinterpret_cast<uint32_t>(&rxMessage->header));
-    LL_DMA_SetDataLength(DMA_RX, DMA_CHANNEL_RX, 30);
+    #if defined(STM32H5xx)
+        LL_DMA_SetDestAddress(DMA_RX, DMA_CHANNEL_RX, reinterpret_cast<uint32_t>(&rxMessage->header));
+        LL_DMA_SetBlkDataLength(DMA_RX, DMA_CHANNEL_RX, 30);
+    #else
+        LL_DMA_SetMemoryAddress(DMA_RX, DMA_CHANNEL_RX, reinterpret_cast<uint32_t>(&rxMessage->header));
+        LL_DMA_SetDataLength(DMA_RX, DMA_CHANNEL_RX, 30);
+    #endif
     LL_UCPD_RxEnable(UCPD1);
     LL_DMA_EnableChannel(DMA_RX, DMA_CHANNEL_RX);
 }
 
 bool PDPhy::transmitMessage(const PDMessage* msg) {
     // configure DMA request
-    LL_DMA_SetMemoryAddress(DMA_TX, DMA_CHANNEL_TX, reinterpret_cast<uint32_t>(&msg->header));
-    LL_DMA_SetDataLength(DMA_TX, DMA_CHANNEL_TX, msg->payloadSize());
+    #if defined(STM32H5xx)
+        LL_DMA_SetSrcAddress(DMA_TX, DMA_CHANNEL_TX, reinterpret_cast<uint32_t>(&msg->header));
+        LL_DMA_SetBlkDataLength(DMA_TX, DMA_CHANNEL_TX, msg->payloadSize());
+    #else
+        LL_DMA_SetMemoryAddress(DMA_TX, DMA_CHANNEL_TX, reinterpret_cast<uint32_t>(&msg->header));
+        LL_DMA_SetDataLength(DMA_TX, DMA_CHANNEL_TX, msg->payloadSize());
+    #endif
     LL_DMA_EnableChannel(DMA_TX, DMA_CHANNEL_TX);
 
     // start transmitting
