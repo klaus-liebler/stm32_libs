@@ -156,3 +156,13 @@ uint32_t PDSourceCapability::programmableRequestObject(int objPos, int& voltage,
 
     return object;
 }
+
+const char* PDSourceCapability::supplyTypeName(PDSupplyType type) {
+    switch (type) {
+        case PDSupplyType::fixed:    return "fixed";
+        case PDSupplyType::battery:  return "battery";
+        case PDSupplyType::variable: return "variable";
+        case PDSupplyType::pps:      return "PPS";
+        default:                     return "?";
+    }
+}

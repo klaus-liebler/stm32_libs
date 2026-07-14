@@ -53,7 +53,7 @@ void TaskScheduler::start() {
     numScheduledTasks = 0;
     ENABLE_TIMER_CLOCK();
     uint32_t prescaler = ((getTimerClockHz() + 500000) / 1000000)-1;
-    log_info("Starting Scheduler using Timer %s with timer freqency %d and a prescaler %d", SCHEDULER_TIMER_NAME, getTimerClockHz(), prescaler);
+    log_info("Starting Scheduler using Timer %s with timer frequency %d and a prescaler %d", SCHEDULER_TIMER_NAME, getTimerClockHz(), prescaler);
     schedulerTimerHandle.Instance = SCHEDULER_TIMER;
     schedulerTimerHandle.Init.Prescaler = prescaler;
     schedulerTimerHandle.Init.CounterMode = TIM_COUNTERMODE_UP;

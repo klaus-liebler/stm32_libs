@@ -86,6 +86,8 @@ void PDPhySTM32UCPD::init(bool isMonitor) {
         // STM32H5's PWR clock is always on (not gateable, no LL_APB1_GRP1_PERIPH_PWR)
         LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_CRC);
         LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPDMA1); // GPDMA has no separate mux clock
+        // verified against firmware_control_unit_ethercat's CubeMX-generated MX_UCPD1_Init()
+        LL_APB1_GRP2_EnableClock(LL_APB1_GRP2_PERIPH_UCPD1);
     #else
         LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_PWR);
         LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_CRC);
@@ -286,6 +288,16 @@ bool PDPhy::transmitMessage(const PDMessage* msg) {
     return true;
 }
 
+bool PDPhy::transmitHardReset() {
+    // Hard Reset is a hardware-generated signaling sequence, not a normal
+    // framed message -- no TX DMA/payload involved, just this one bit.
+    // Completion is reported via the HRSTSENT/HRSTDISC status flags handled
+    // in handleInterrupt(). Available on plain UCPD1 (no TCPP03 involved),
+    // so this works unchanged on a target board without that IC.
+    LL_UCPD_SendHardReset(UCPD1);
+    return true;
+}
+
 void PDPhySTM32UCPD::enableCommunication(int cc) {
     // set pin for communication
     LL_UCPD_SetCCPin(UCPD1, cc == 1 ? LL_UCPD_CCPIN_CC1 : LL_UCPD_CCPIN_CC2);
@@ -296,6 +308,8 @@ void PDPhySTM32UCPD::enableCommunication(int cc) {
     LL_UCPD_EnableIT_TxMSGSENT(UCPD1);
     LL_UCPD_EnableIT_TxMSGDISC(UCPD1);
     LL_UCPD_EnableIT_TxMSGABT(UCPD1);
+    LL_UCPD_EnableIT_TxHRSTSENT(UCPD1);
+    LL_UCPD_EnableIT_TxHRSTDISC(UCPD1);
 
     enableRead();
 }
@@ -315,6 +329,8 @@ void PDPhySTM32UCPD::disableCommunication() {
     LL_UCPD_DisableIT_TxMSGSENT(UCPD1);
     LL_UCPD_DisableIT_TxMSGDISC(UCPD1);
     LL_UCPD_DisableIT_TxMSGABT(UCPD1);
+    LL_UCPD_DisableIT_TxHRSTSENT(UCPD1);
+    LL_UCPD_DisableIT_TxHRSTDISC(UCPD1);
 }
 
 // interrupt handler
@@ -356,6 +372,18 @@ void PDPhySTM32UCPD::handleInterrupt() {
     if ((status & UCPD_SR_RXHRSTDET) != 0) {
         LL_UCPD_ClearFlag_RxHRST(UCPD1);
         PowerController.onReset(PDSOPSequence::hardReset);
+    }
+
+    // our own hard reset transmission completed
+    if ((status & UCPD_SR_HRSTSENT) != 0) {
+        LL_UCPD_ClearFlag_TxHRSTSENT(UCPD1);
+        PowerController.onReset(PDSOPSequence::hardReset);
+    }
+
+    // our own hard reset transmission was discarded (CC line was busy) - the
+    // caller's retry loop (see PDSink::onRequestSourceCaps) will try again later
+    if ((status & UCPD_SR_HRSTDISC) != 0) {
+        LL_UCPD_ClearFlag_TxHRSTDISC(UCPD1);
     }
 
     // message received

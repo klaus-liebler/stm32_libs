@@ -90,6 +90,27 @@ bool PDController::sendDataMessage(PDMessageType messageType, int numObjects, co
     return sendMessage();
 }
 
+bool PDController::sendHardReset() {
+    if (isTransmitting())
+        return false;
+    return PDPhy::transmitHardReset();
+}
+
+const char* PDController::logEntryTypeName(PDLogEntryType type) {
+    switch (type) {
+        case PDLogEntryType::sinkSourceConnected:    return "CC attach detected";
+        case PDLogEntryType::sinkSourceDisconnected: return "CC detach detected";
+        case PDLogEntryType::hardReset:              return "hard reset received";
+        case PDLogEntryType::cableReset:             return "cable reset received";
+        case PDLogEntryType::messageReceived:        return "message received";
+        case PDLogEntryType::transmissionStarted:    return "transmission started";
+        case PDLogEntryType::transmissionCompleted:  return "transmission completed";
+        case PDLogEntryType::transmissionFailed:     return "transmission failed";
+        case PDLogEntryType::error:                  return "RX error";
+        default:                                     return "?";
+    }
+}
+
 bool PDController::sendMessage() {
     bool isGoodCrc = txMessage->type() == PDMessageType::controlGoodCrc;
 

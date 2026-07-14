@@ -36,9 +36,15 @@ void PDSink::reset(bool connected) {
     flagVoltageChanged = true;
     flagPowerRejected = false;
     capabilitiesChanged = false;
+    sourceCapsRetryCount = 0;
     Scheduler.cancelTask(rerequestPPSCallback);
     Scheduler.cancelTask(requestSourceCapsCallback);
-    if (connected)
+    // Also resume polling on a reset while still attached (ccPin unchanged by a Hard
+    // Reset), not just on a fresh attach - otherwise a self-triggered Hard Reset (see
+    // PDSink::onRequestSourceCaps) would have its own just-scheduled retry cancelled
+    // here without being replaced, leaving no fallback if the Source doesn't
+    // spontaneously resend Source_Capabilities as required by spec.
+    if (connected || PowerController.ccPin != 0)
         Scheduler.scheduleTaskAfter(requestSourceCapsCallback, SourceCapsRequestDelayUs);
 }
 
@@ -230,10 +236,21 @@ void PDSink::onRequestSourceCaps() {
     if (PowerController.ccPin == 0 || numSourceCapabilities > 0)
         return;
 
+    if (sourceCapsRetryCount >= MaxSourceCapsRetriesBeforeHardReset) {
+        // plain Get_Source_Cap polling isn't getting answered - force the
+        // Source to restart PD negotiation, which per spec makes it
+        // re-broadcast Source_Capabilities on its own
+        sourceCapsRetryCount = 0;
+        PowerController.sendHardReset();
+        Scheduler.scheduleTaskAfter(requestSourceCapsCallback, SourceCapsRequestDelayUs);
+        return;
+    }
+
     bool sent = PowerController.sendControlMessage(PDMessageType::controlGetSourceCap);
     if (!sent) {
         Scheduler.scheduleTaskAfter(requestSourceCapsCallback, 10000);
     } else {
+        sourceCapsRetryCount++;
         Scheduler.scheduleTaskAfter(requestSourceCapsCallback, SourceCapsRetryDelayUs);
     }
 }

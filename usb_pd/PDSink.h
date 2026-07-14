@@ -143,6 +143,13 @@ private:
 
     static constexpr uint32_t SourceCapsRequestDelayUs = 100000;
     static constexpr uint32_t SourceCapsRetryDelayUs = 200000;
+    // after this many unanswered Get_Source_Cap requests, escalate to a Hard Reset
+    // (some supplies only (re-)broadcast Source_Capabilities around a Hard Reset,
+    // e.g. if they were already attached before this device started communicating
+    // and their post-attach broadcast window was missed)
+    static constexpr int MaxSourceCapsRetriesBeforeHardReset = 3;
+
+    int sourceCapsRetryCount;
 
     ErrorCode requestPowerCore(int voltage, int maxCurrent);
     void handleEvent(const PDControllerEvent& event);

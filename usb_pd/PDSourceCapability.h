@@ -51,4 +51,6 @@ struct PDSourceCapability {
     /// Creates a 'Programmable Request' data object. 'voltage' and 'maxCurrent' are changed to the effectively requestd
     /// values.
     static uint32_t programmableRequestObject(int objPos, int& voltage, int& current);
+    /// Returns a human-readable name for a supply type (e.g. for logging)
+    static const char* supplyTypeName(PDSupplyType type);
 };

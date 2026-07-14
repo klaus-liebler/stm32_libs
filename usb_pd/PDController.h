@@ -138,6 +138,23 @@ public:
     /// Starts sending a data message
     bool sendDataMessage(PDMessageType messageType, int numObjects, const uint32_t* objects);
 
+    /**
+     * @brief Sends a Hard Reset to force the Source to restart PD negotiation.
+     *
+     * Use this when a Source that was already attached before this device
+     * started communicating never spontaneously (re-)broadcasts
+     * Source_Capabilities and does not answer an explicit Get_Source_Cap
+     * either -- a real (if non-compliant-with-the-easy-path) situation seen
+     * with some supplies. The Hard Reset forces it to go through its normal
+     * attach-time behavior again.
+     *
+     * @return `true` if the Hard Reset transmission was started
+     */
+    bool sendHardReset();
+
+    /// Returns a human-readable name for a log entry type (e.g. for logging)
+    static const char* logEntryTypeName(PDLogEntryType type);
+
 private:
     static constexpr int LogSize = 32;
     static constexpr int RxBufferLength = 512;

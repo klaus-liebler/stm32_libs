@@ -230,19 +230,23 @@ uint32_t ParseU32_BigEndian(const uint8_t *const buffer, size_t offset)
 }
 
 
+// DWT cycle counter based - deliberately independent of SysTick/HAL_GetTick().
+// The previous implementation interpolated between HAL_GetTick() and SysTick->VAL,
+// which is only valid if SysTick itself is the HAL tick source. Under an RTOS
+// (e.g. ThreadX) that claims SysTick for its own scheduler tick and moves the HAL
+// tick to a different timer, HAL_GetTick() and SysTick run independently and the
+// interpolation returns garbage. DWT->CYCCNT free-runs off the core clock
+// regardless of what SysTick or the HAL tick timer are doing.
 uint32_t micros(void)
 {
-  uint32_t m0 = HAL_GetTick();
-  __IO uint32_t u0 = SysTick->VAL;
-  uint32_t m1 = HAL_GetTick();
-  __IO uint32_t u1 = SysTick->VAL;
-  const uint32_t tms = SysTick->LOAD + 1;
-
-  if (m1 != m0) {
-    return (m1 * 1000 + ((tms - u1) * 1000) / tms);
-  } else {
-    return (m0 * 1000 + ((tms - u0) * 1000) / tms);
+  static uint32_t ticks_per_us = 0;
+  if (ticks_per_us == 0) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    ticks_per_us = SystemCoreClock / 1000000U;
   }
+  return DWT->CYCCNT / ticks_per_us;
 }
 
 

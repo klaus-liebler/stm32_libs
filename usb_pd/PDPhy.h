@@ -52,4 +52,20 @@ struct PDPhy {
      *      (TX activity by this or the other device, no active CC line)
      */
     static bool transmitMessage(const PDMessage* msg);
+
+    /**
+     * @brief Transmits a Hard Reset signal.
+     *
+     * This forces the connected Source to reset the Power Delivery
+     * communication and, per spec, re-apply VBUS and re-broadcast
+     * Source_Capabilities -- even if it was already attached (and its
+     * one-time post-attach broadcast window was missed) before this
+     * device started communicating.
+     *
+     * The method is asynchronous; completion (or discard, if the line
+     * was busy) is reported via the TxHRSTSENT / TxHRSTDISC interrupts.
+     *
+     * @return `true` if the Hard Reset transmission was started
+     */
+    static bool transmitHardReset();
 };
