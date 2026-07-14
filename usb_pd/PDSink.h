@@ -12,7 +12,9 @@
 
 #include "PDController.h"
 #include "PDSourceCapability.h"
+#include <cstddef>
 #include <functional>
+#include <memory>
 #include <vector>
 
 enum class PDSinkEventType {
@@ -100,6 +102,24 @@ public:
      * @return 'true' if the desired voltage and current are available
      */
     bool requestPower(int voltage, int maxCurrent = 0);
+
+    /**
+     * @brief Formats the current source capabilities as a human-readable,
+     * tabular multi-line string, e.g. for a single log statement.
+     *
+     * The first line summarizes the capability count; every following line
+     * describes one capability and is indented by `indentFromLine2` spaces,
+     * so the table lines up under a caller-side log line prefix of that width
+     * (e.g. timestamp/level/file:line).
+     *
+     * The returned buffer is allocated to the exact size needed (no
+     * truncation) and owned by the caller via `unique_ptr` -- no manual
+     * `delete[]` required.
+     *
+     * @param indentFromLine2 number of spaces to indent every line after the first
+     * @return the formatted, null-terminated string
+     */
+    std::unique_ptr<char[]> printCapabilitiesToBuf(int indentFromLine2);
 
     /// Number of valid elements in `sourceCapabilities` array
     int numSourceCapabilities = 0;

@@ -11,6 +11,7 @@
 #include "PDSink.h"
 #include "TaskScheduler.h"
 #include "hal_header_selector.h"
+#include <cstdio>
 
 PDSink PowerSink;
 
@@ -183,6 +184,37 @@ void PDSink::onMessageReceived(const PDMessage* message) {
 
     default:; // nothing to do
     }
+}
+
+std::unique_ptr<char[]> PDSink::printCapabilitiesToBuf(int indentFromLine2) {
+    // Simplified sizing: rather than measuring every literal/numeric field
+    // precisely, just assume a generous max length for the header and for
+    // any one capability line (excluding indent) -- a few wasted bytes don't
+    // matter for a one-off log buffer. E.g. a line looks like
+    // "[6] variable  51150- 51150 mV, max 10230 mA" (45 chars); maxLineLen
+    // below leaves comfortable headroom for that.
+    constexpr size_t maxHeaderLen = 48;
+    constexpr size_t maxLineLen = 64;
+
+    size_t bufSize = maxHeaderLen + (size_t)numSourceCapabilities * (maxLineLen + (size_t)indentFromLine2) + 1 /* '\0' */;
+
+    auto buf = std::unique_ptr<char[]>(new char[bufSize]);
+
+    size_t pos = 0;
+    int n = snprintf(buf.get(), bufSize, "USB-PD: %d source capabilit%s:",
+                      numSourceCapabilities, numSourceCapabilities == 1 ? "y" : "ies");
+    pos = (n > 0) ? (size_t)n : 0;
+
+    for (int i = 0; i < numSourceCapabilities; i++) {
+        const PDSourceCapability& cap = sourceCapabilities[i];
+        n = snprintf(buf.get() + pos, bufSize - pos,
+                      "\r\n%*s[%d] %-8s %6u-%6u mV, max %4u mA",
+                      indentFromLine2, "", i, PDSourceCapability::supplyTypeName(cap.supplyType),
+                      cap.minVoltage, cap.maxVoltage, cap.maxCurrent);
+        pos += (n > 0) ? (size_t)n : 0;
+    }
+
+    return buf;
 }
 
 void PDSink::onSourceCapabilities(const PDMessage* message) {
