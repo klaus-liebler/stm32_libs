@@ -1,0 +1,5 @@
+  TimerCapabilities{P::TIM15_, 65535u, 65535u, 255u, 2, true, TIM15, +[]{ __HAL_RCC_TIM15_CLK_ENABLE(); }},
+  TimerCapabilities{P::TIM16_, 65535u, 65535u, 255u, 1, true, TIM16, +[]{ __HAL_RCC_TIM16_CLK_ENABLE(); }},
+  TimerCapabilities{P::TIM1_, 65535u, 65535u, 65535u, 4, true, TIM1, +[]{ __HAL_RCC_TIM1_CLK_ENABLE(); }},
+  TimerCapabilities{P::TIM2_, 65535u, 4294967295u, 0u, 4, false, TIM2, +[]{ __HAL_RCC_TIM2_CLK_ENABLE(); }},
+  TimerCapabilities{P::TIM6_, 65535u, 65535u, 0u, 0, false, TIM6, +[]{ __HAL_RCC_TIM6_CLK_ENABLE(); }},

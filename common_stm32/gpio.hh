@@ -1,9 +1,8 @@
 #pragma once
-#if defined(STM32G4) || defined(STM32H5)
+
 #include "hal_header_selector.h"
-#if defined(STM32G4)
-#include <stm32g4xx_ll_gpio.h>
-#endif
+#include "ll_header_selector.h"
+#include "gpio/pins.hh"
 
 
 static constexpr uint32_t GPIOx_MODER = 0x00;
@@ -19,121 +18,6 @@ static constexpr uint32_t GPIOx_AFRH = 0x24;
 static constexpr uint32_t GPIOx_BRR = 0x28;
 namespace gpio {
 
-enum class Pin : uint8_t {
-  PA00,
-  PA01,
-  PA02,
-  PA03,
-  PA04,
-  PA05,
-  PA06,
-  PA07,
-  PA08,
-  PA09,
-  PA10,
-  PA11,
-  PA12,
-  PA13,
-  PA14,
-  PA15,
-  PB00,
-  PB01,
-  PB02,
-  PB03,
-  PB04,
-  PB05,
-  PB06,
-  PB07,
-  PB08,
-  PB09,
-  PB10,
-  PB11,
-  PB12,
-  PB13,
-  PB14,
-  PB15,
-  PC00,
-  PC01,
-  PC02,
-  PC03,
-  PC04,
-  PC05,
-  PC06,
-  PC07,
-  PC08,
-  PC09,
-  PC10,
-  PC11,
-  PC12,
-  PC13,
-  PC14,
-  PC15,
-  PD00,
-  PD01,
-  PD02,
-  PD03,
-  PD04,
-  PD05,
-  PD06,
-  PD07,
-  PD08,
-  PD09,
-  PD10,
-  PD11,
-  PD12,
-  PD13,
-  PD14,
-  PD15,
-  PE00,
-  PE01,
-  PE02,
-  PE03,
-  PE04,
-  PE05,
-  PE06,
-  PE07,
-  PE08,
-  PE09,
-  PE10,
-  PE11,
-  PE12,
-  PE13,
-  PE14,
-  PE15,
-  PF00,
-  PF01,
-  PF02,
-  PF03,
-  PF04,
-  PF05,
-  PF06,
-  PF07,
-  PF08,
-  PF09,
-  PF10,
-  PF11,
-  PF12,
-  PF13,
-  PF14,
-  PF15,
-  PG00,
-  PG01,
-  PG02,
-  PG03,
-  PG04,
-  PG05,
-  PG06,
-  PG07,
-  PG08,
-  PG09,
-  PG10,
-  PG11,
-  PG12,
-  PG13,
-  PG14,
-  PG15,
-  NO_PIN = UINT8_MAX
-};
 
 enum class Mode : uint8_t {
   Input = 0b00,
@@ -297,5 +181,4 @@ public:
         (1 << (pinIndex + (regVal & (1 << pinIndex) ? 16 : 0)));
   }
 };
-} // namespace gpio
-#endif // STM32G4 || STM32H5
+}
