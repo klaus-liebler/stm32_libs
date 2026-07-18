@@ -16,13 +16,13 @@
 PDSink PowerSink;
 
 PDSink::PDSink(bool busPowered)
-    : isBusPowered(busPowered), eventCallback(nullptr), ppsIndex(-1), desiredVoltage(5000),
+    : isBusPowered(busPowered), eventHandler(nullptr), ppsIndex(-1), desiredVoltage(5000),
       desiredCurrent(0), capabilitiesChanged(false), flagSourceCapChanged(false),
       flagVoltageChanged(false), flagPowerRejected(false) {}
 
-void PDSink::start(EventCallbackFunction callback) {
+void PDSink::start(IUsbPdEventHandler* handler) {
     Scheduler.start();
-    eventCallback = callback;
+    eventHandler = handler;
     reset(false);
     PowerController.startController([this](auto event) { handleEvent(event); });
 }
@@ -50,21 +50,21 @@ void PDSink::reset(bool connected) {
 }
 
 void PDSink::Loop() {
-    if (eventCallback == nullptr)
+    if (eventHandler == nullptr)
         return;
 
     while (flagSourceCapChanged || flagVoltageChanged || flagPowerRejected) {
         if (flagSourceCapChanged) {
             flagSourceCapChanged = false;
-            eventCallback(PDSinkEventType::sourceCapabilitiesChanged);
+            eventHandler->HandleUsbPDEvent(PDSinkEventType::sourceCapabilitiesChanged);
         }
         if (flagVoltageChanged) {
             flagVoltageChanged = false;
-            eventCallback(PDSinkEventType::voltageChanged);
+            eventHandler->HandleUsbPDEvent(PDSinkEventType::voltageChanged);
         }
         if (flagPowerRejected) {
             flagPowerRejected = false;
-            eventCallback(PDSinkEventType::powerRejected);
+            eventHandler->HandleUsbPDEvent(PDSinkEventType::powerRejected);
         }
     }
 }

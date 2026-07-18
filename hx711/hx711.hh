@@ -2,11 +2,7 @@
 #include "gpio.hh"
 #include "log.h"
 #include "main.h"
-
-#include "stm32g431xx.h"
-#include "stm32g4xx_hal.h"
-#include "stm32g4xx_hal_gpio.h"
-#include "stm32g4xx_hal_spi.h"
+#include "hal_header_selector.h"
 
 #include <array>
 #include <cmath>
@@ -41,7 +37,6 @@ class HX711 {
 
   enum class ReadoutState {
     WAIT_FOR_DATA_READY,
-    WAIT_FOR_DMA_COMPLETION,
     ERROR,
   };
 
@@ -140,34 +135,26 @@ void loop(void) {
           return;
         }
       }
-      log_debug("WAIT_FOR_DATA_READY --> DATA IS READY, starting DMA readout --> WAIT_FOR_DMA_COMPLETION");
-      
-      if (HAL_SPI_TransmitReceive_DMA(hspi, (uint8_t*) (&TxData), (uint8_t*) (&RxData), sizeof(TxData)) != HAL_OK){
-        log_warn("Failed to start DMA readout: state=%lu err=0x%08lX", (unsigned long)hspi->State, (unsigned long)hspi->ErrorCode);
-        readout_state = ReadoutState::ERROR;
-        
-      } else {
-        log_debug("Started DMA readout successfully");
-        readout_state = ReadoutState::WAIT_FOR_DMA_COMPLETION;
-      }
-      break;
-    case ReadoutState::WAIT_FOR_DMA_COMPLETION:
-      if (hspi->ErrorCode != 0) {
-        // DMA error occurred
-        log_warn("WAIT_FOR_DMA_COMPLETION error: state=%lu err=0x%08lX", (unsigned long)hspi->State, (unsigned long)hspi->ErrorCode);
-        readout_state = ReadoutState::ERROR;
-      }else if (hspi->State != HAL_SPI_STATE_READY && hspi->State != HAL_SPI_STATE_RESET) {
-          log_debug("WAIT_FOR_DMA_COMPLETION, still waiting, debug info: state=%lu err=0x%08lX",
-                 (unsigned long)hspi->State, (unsigned long)hspi->ErrorCode);
-          return; // Still waiting for DMA to complete
-      } else if (hspi->State == HAL_SPI_STATE_READY) {
-        log_debug("DMA readout completed successfully");
-        convertArrayToUint32AndUpdateLastReading();
-        readout_state = ReadoutState::WAIT_FOR_DATA_READY;
-      }else{
-        log_debug("WAIT_FOR_DMA_COMPLETION, unexpected state, debug info: state=%lu err=0x%08lX",
-                 (unsigned long)hspi->State, (unsigned long)hspi->ErrorCode);
-        readout_state = ReadoutState::ERROR;
+      // Blockierender statt DMA-basierter Transfer: HAL_SPI_TransmitReceive_DMA() blieb auf
+      // diesem Board zuverlaessig in HAL_SPI_STATE_BUSY_TX_RX haengen (ErrorCode=0, also kein
+      // erkennbarer Fehler -- die DMA-Anforderungskopplung fuer SPI2 TX/RX kam nie zum
+      // Abschluss). Ein blockierender Transfer derselben 8 Bytes ueber dieselbe SPI-Instanz
+      // funktioniert dagegen zuverlaessig, was SPI-Peripherie/Takt/Verdrahtung als Ursache
+      // ausschliesst. Bei ~8 Bytes und dem 50ms-Zyklus des aufrufenden io_thread (s.
+      // scale_update()) faellt eine kurze Blockierung nicht ins Gewicht -- daher bewusst nicht
+      // weiter Richtung DMA nachverfolgt.
+      {
+        HAL_StatusTypeDef res = HAL_SPI_TransmitReceive(hspi, (uint8_t*) (&TxData), (uint8_t*) (&RxData),
+                                                         sizeof(TxData), 100);
+        if (res != HAL_OK) {
+          log_warn("HX711: SPI-Transfer fehlgeschlagen: status=%d state=%lu err=0x%08lX",
+                   (int)res, (unsigned long)hspi->State, (unsigned long)hspi->ErrorCode);
+          readout_state = ReadoutState::ERROR;
+        } else {
+          log_debug("HX711: SPI-Transfer erfolgreich");
+          convertArrayToUint32AndUpdateLastReading();
+          readout_state = ReadoutState::WAIT_FOR_DATA_READY;
+        }
       }
       break;
     case ReadoutState::ERROR:

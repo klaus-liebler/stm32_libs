@@ -95,7 +95,6 @@ bool TMC2209::InitForNormalSpeedAndUartBasedOperation(
     bool usePotimeterForCurrentScaling, bool disable_read, MicroStepResolution resolution) {
   // Optionally, perform any initialization here
   enable();
-  HAL_Delay(10);
   if(!disable_read) {
     if (!fetchImportantRegistersForLocalMirroring()) {
       return false;
@@ -147,6 +146,26 @@ if(resolution != MicroStepResolution::RES256){
 
   if (!clearGStat("Failed to clear GSTAT after init")) {
     return false;
+  }
+
+  // VACTUAL != 0 laesst den Chip den internen Schrittgenerator nutzen und das externe STEP-Pin
+  // dabei komplett ignorieren (TMC2209-Datenblatt) -- ueberlebt einen reinen MCU-Reflash, da der
+  // TMC2209 eine eigene Versorgungs-/Reset-Domaene hat. Ohne diesen Reset wuerde ein vorheriger
+  // GenerateSteps(ungleich 0)-Aufruf (z.B. ein elektrischer Test) den externen STEP/DIR-Pfad
+  // (SigmoidStepper) auf unbestimmte Zeit unwirksam machen, ohne dass das hier erkennbar waere.
+  if (!checkedWriteRegister(RegIdx::VACTUAL, 0,
+                  "Failed to reset VACTUAL to 0 (external STEP/DIR mode) during init")) {
+    return false;
+  }
+  // TMC2209-Schreibbefehle sind fire-and-forget (kein ACK ueber UART) -- Rueckgabewert von
+  // writeRegister() bestaetigt nur den erfolgreichen UART-Versand, nicht die tatsaechliche
+  // Anwendung durch den Chip. Deshalb hier zur Diagnose ("Sigmoid-Test bewegt nichts") aktiv
+  // zurueckgelesen und geloggt.
+  uint32_t vactual_check = 0xDEADBEEF;
+  if (readRegister(RegIdx::VACTUAL, vactual_check)) {
+    log_info("TMC2209: VACTUAL nach Reset = %ld (sollte 0 sein)", (long)(int32_t)vactual_check);
+  } else {
+    log_warn("TMC2209: VACTUAL-Ruecklesen nach Reset fehlgeschlagen");
   }
 
   return true;
@@ -620,6 +639,181 @@ bool TMC2209::GenerateSteps(int fullStepsPerSecond) {
     }
   }
   return true;
+}
+
+bool TMC2209::HomeSensorless(int homingSpeedFullStepsPerSecond, uint8_t sgthrs, uint32_t timeoutMs, uint32_t travelOppositeMs, uint32_t homingDeadTimeMs) {
+  log_info("TMC2209: Starting sensorless homing (speed=%d full steps/s, sgthrs=%u, timeout=%lu ms)",
+           homingSpeedFullStepsPerSecond, (unsigned int)sgthrs, (unsigned long)timeoutMs);
+
+  // CoolStep braucht SpreadCycle (s. EnableCoolStep()) -- fuer die Dauer des Homings aktiviert,
+  // damit sowohl die lastabhaengige Stromabsenkung (weniger Erwaermung waehrend der Fahrt) als
+  // auch StallGuard (SG_RESULT, fuer die Stall-Erkennung unten) verfuegbar sind. Defaultwerte
+  // von EnableCoolStep() bis auf sgthrs unveraendert uebernommen.
+  if (!EnableCoolStep(/*tcoolthrs=*/450, sgthrs)) {
+    log_error("TMC2209: Failed to enable CoolStep for homing");
+    return false;
+  }
+
+  // Kurz entgegengesetzt anfahren, BEVOR die eigentliche Stall-Suche beginnt: steht der Motor
+  // beim Aufruf bereits am Zielanschlag, waere die allererste SG_RESULT-Messung sonst ein
+  // "Stall" ohne vorherige echte Bewegung -- die Einschwingzeit unten faengt das zwar sicher ab,
+  // aber ein tatsaechlich bereits bewegter Anlauf liefert eindeutigere/verlaesslichere Messwerte
+  // als ein Anlauf aus dem Stillstand heraus. Feste, kurze Dauer statt einer festen
+  // Schrittzahl/"einiger Umdrehungen": existiert IN DIESER Richtung ebenfalls ein Anschlag, ist
+  // die Blockierdauer dadurch trotzdem begrenzt, nicht unbegrenzt. CoolStep ist zu diesem
+  // Zeitpunkt bereits aktiv, begrenzt den Strom also auch hier.
+  log_info("Pre-homing opposite direction travel for %lu ms", (unsigned long)travelOppositeMs);
+  GenerateSteps(-homingSpeedFullStepsPerSecond);
+  HAL_Delay(travelOppositeMs);
+  GenerateSteps(0);
+  HAL_Delay(50); // kurze Pause, bis der Motor sicher zum Stillstand gekommen ist
+  log_info("Pre-homing opposite direction travel complete, starting homing motion");
+  if (!GenerateSteps(homingSpeedFullStepsPerSecond)) {
+    log_error("TMC2209: Failed to start homing motion");
+    // GCONF auch bei fehlgeschlagenem Start wieder auf StealthChop zuruecksetzen (s.u.).
+    gconf.REG.enable_spread_cycle = 0;
+    checkedWriteRegister(RegIdx::GCONF, gconf.U32, "Failed to restore StealthChop after failed homing start");
+    return false;
+  }
+
+  // SG_RESULT ist unmittelbar nach einer Geschwindigkeitsaenderung nicht verlaesslich (die
+  // interne Lastschaetzung des Chips braucht eine kurze Einschwingzeit) -- ohne diese Wartezeit
+  // koennte ein Motor, der beim Aufruf bereits blockiert ist (z.B. schon am Anschlag steht),
+  // einen fehlerhaft HOHEN (="kein Stall") ersten Messwert liefern und dadurch bis zu
+  // timeoutMs lang unter Last gegen den Anschlag weiterlaufen -- genau die Erwaermung, die
+  // IHOLD_IRUN oben eigentlich vermeiden soll. Nach dieser Einschwingzeit erkennt ein
+  // tatsaechlich bereits blockierter Motor den Stall dagegen sofort beim ersten echten
+  // SG_RESULT-Wert, nicht erst nach dem vollen Timeout.
+  HAL_Delay(homingDeadTimeMs);
+  log_info("Homing dead time of %lu ms complete, starting stall detection", (unsigned long)homingDeadTimeMs);
+  const uint32_t start = HAL_GetTick();
+  bool stalled = false;
+  while ((HAL_GetTick() - start) < timeoutMs) {
+    uint32_t sg_result = 0;
+    if (readRegister(RegIdx::SG_RESULT, sg_result, 200, false)) {
+      // SG_RESULT sinkt mit steigender Last; ein Wert deutlich unter der (verdoppelten, s.
+      // Datenblatt) SGTHRS-Schwelle zeigt einen Stall (mechanischer Anschlag) an.
+      if ((sg_result & 0x3FF) < ((uint32_t)sgthrs * 2U)) {
+        stalled = true;
+        break;
+      }
+    }
+    HAL_Delay(5);
+  }
+
+  GenerateSteps(0); // Motor in jedem Fall anhalten, unabhaengig vom Ergebnis.
+
+  // CoolStep/SpreadCycle war bewusst nur fuers Homing gedacht (s. Klassenkommentar in
+  // tmc2209.hpp) -- danach zurueck auf StealthChop (ruhiger Normalbetrieb).
+  gconf.REG.enable_spread_cycle = 0;
+  checkedWriteRegister(RegIdx::GCONF, gconf.U32, "Failed to restore StealthChop after homing");
+
+  if (stalled) {
+    log_info("TMC2209: Stall detected -- homing complete");
+  } else {
+    log_warn("TMC2209: Homing timeout after %lu ms -- no stall detected", (unsigned long)timeoutMs);
+  }
+  return stalled;
+}
+
+bool TMC2209::StartHomingNonBlocking(int homingSpeedFullStepsPerSecond, uint8_t sgthrs, uint32_t timeoutMs, uint32_t travelOppositeMs, uint32_t homingDeadTimeMs) {
+  log_info("TMC2209: Starting non-blocking sensorless homing (speed=%d full steps/s, sgthrs=%u, timeout=%lu ms)",
+           homingSpeedFullStepsPerSecond, (unsigned int)sgthrs, (unsigned long)timeoutMs);
+
+  if (!EnableCoolStep(/*tcoolthrs=*/450, sgthrs)) {
+    log_error("TMC2209: Failed to enable CoolStep for homing");
+    homing_phase_ = HomingPhase::Idle;
+    return false;
+  }
+
+  homing_speed_ = homingSpeedFullStepsPerSecond;
+  homing_sgthrs_ = sgthrs;
+  homing_timeout_ms_ = timeoutMs;
+  homing_travel_opposite_ms_ = travelOppositeMs;
+  homing_dead_time_ms_ = homingDeadTimeMs;
+
+  // Kurz entgegengesetzt anfahren, BEVOR die eigentliche Stall-Suche beginnt -- s.
+  // HomeSensorless() fuer die Begruendung.
+  if (!GenerateSteps(-homingSpeedFullStepsPerSecond)) {
+    log_error("TMC2209: Failed to start pre-homing opposite travel");
+    homing_phase_ = HomingPhase::Idle;
+    return false;
+  }
+
+  homing_phase_ = HomingPhase::OppositeTravel;
+  homing_phase_start_ms_ = HAL_GetTick();
+  return true;
+}
+
+TMC2209::HomingResult TMC2209::TickHoming(uint32_t now_ms) {
+  switch (homing_phase_) {
+    case HomingPhase::Idle:
+      // TickHoming() ohne vorheriges StartHomingNonBlocking() -- nichts zu tun.
+      return HomingResult::Error;
+
+    case HomingPhase::OppositeTravel:
+      if ((now_ms - homing_phase_start_ms_) < homing_travel_opposite_ms_) {
+        return HomingResult::InProgress;
+      }
+      GenerateSteps(0);
+      homing_phase_ = HomingPhase::Settle;
+      homing_phase_start_ms_ = now_ms;
+      return HomingResult::InProgress;
+
+    case HomingPhase::Settle:
+      // Kurze Pause, bis der Motor sicher zum Stillstand gekommen ist (s. HomeSensorless()).
+      if ((now_ms - homing_phase_start_ms_) < 50) {
+        return HomingResult::InProgress;
+      }
+      if (!GenerateSteps(homing_speed_)) {
+        log_error("TMC2209: Failed to start homing motion");
+        gconf.REG.enable_spread_cycle = 0;
+        checkedWriteRegister(RegIdx::GCONF, gconf.U32, "Failed to restore StealthChop after failed homing start");
+        homing_phase_ = HomingPhase::Idle;
+        return HomingResult::Error;
+      }
+      homing_phase_ = HomingPhase::DeadTime;
+      homing_phase_start_ms_ = now_ms;
+      return HomingResult::InProgress;
+
+    case HomingPhase::DeadTime:
+      // SG_RESULT ist unmittelbar nach einer Geschwindigkeitsaenderung nicht verlaesslich -- s.
+      // HomeSensorless() fuer die Begruendung dieser Wartezeit.
+      if ((now_ms - homing_phase_start_ms_) < homing_dead_time_ms_) {
+        return HomingResult::InProgress;
+      }
+      log_info("Homing dead time complete, starting stall detection");
+      homing_phase_ = HomingPhase::StallDetect;
+      homing_phase_start_ms_ = now_ms; // ab hier laeuft das Timeout-Fenster
+      return HomingResult::InProgress;
+
+    case HomingPhase::StallDetect: {
+      uint32_t sg_result = 0;
+      bool stalled = false;
+      if (readRegister(RegIdx::SG_RESULT, sg_result, 200, false)) {
+        // SG_RESULT sinkt mit steigender Last; ein Wert deutlich unter der (verdoppelten, s.
+        // Datenblatt) SGTHRS-Schwelle zeigt einen Stall (mechanischer Anschlag) an.
+        stalled = (sg_result & 0x3FF) < ((uint32_t)homing_sgthrs_ * 2U);
+      }
+
+      if (!stalled && (now_ms - homing_phase_start_ms_) < homing_timeout_ms_) {
+        return HomingResult::InProgress;
+      }
+
+      GenerateSteps(0); // Motor in jedem Fall anhalten, unabhaengig vom Ergebnis.
+      gconf.REG.enable_spread_cycle = 0;
+      checkedWriteRegister(RegIdx::GCONF, gconf.U32, "Failed to restore StealthChop after homing");
+      homing_phase_ = HomingPhase::Idle;
+
+      if (stalled) {
+        log_info("TMC2209: Stall detected -- homing complete");
+        return HomingResult::Success;
+      }
+      log_warn("TMC2209: Homing timeout after %lu ms -- no stall detected", (unsigned long)homing_timeout_ms_);
+      return HomingResult::Timeout;
+    }
+  }
+  return HomingResult::Error;
 }
 
 } // namespace tmc2209

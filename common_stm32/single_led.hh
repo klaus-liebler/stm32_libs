@@ -74,8 +74,14 @@ namespace single_led
 
         void AnimatePixel(uint32_t now, AnimationPattern *pattern, uint32_t timeToAutoOff=0)//time is relative, "0" means: no auto off
         {
-            if(pattern==nullptr) this->pattern=standbyPattern;
-            
+            // Bugfix: vorher wurde bei pattern==nullptr zwar this->pattern auf standbyPattern
+            // gesetzt, direkt danach aber pattern->Reset(now) mit dem WEITERHIN nullptr-wertigen
+            // lokalen Parameter aufgerufen (Nullpointer-Crash), und this->pattern=pattern am Ende
+            // hat die standbyPattern-Zuweisung ohnehin wieder ueberschrieben. Fix: den lokalen
+            // Parameter selbst umbiegen, damit Reset()/die Endzuweisung konsistent denselben
+            // (gueltigen) Zeiger verwenden.
+            if(pattern==nullptr) pattern=standbyPattern;
+
             if(timeToAutoOff==0){
                 this->timeToAutoOff=UINT32_MAX;
             }else{

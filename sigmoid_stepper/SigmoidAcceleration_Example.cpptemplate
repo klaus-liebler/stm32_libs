@@ -1,0 +1,118 @@
+/**
+ * @file SigmoidAcceleration_Example.cpptemplate
+ * @brief Beispielcode für die Verwendung von SigmoidStepper + SigmoidAccelerationProfile
+ *
+ * HINWEIS (2026): diese Datei wurde komplett neu geschrieben. Die vorherige Fassung bezog sich
+ * auf eine laengst nicht mehr existierende API (SigmoidAcceleration.hpp/SigmoidLookupTables.hpp,
+ * setLookupTable()/reset()/isComplete()/getNextARR(), AccelerationProfileFactory,
+ * AccelerationSegment-Felder end_time/end_arr/max_deviation) -- keine dieser Klassen/Methoden/
+ * Felder existiert in sigmoid_stepper.hh/sigmoid_acceleration_profile.hh. Die tatsaechliche
+ * aktuelle API generiert die Step/Dir-Pulse selbst per Timer-Update-Interrupt
+ * (SigmoidStepper::Handle_update_interrupt_(), aufgerufen aus dem jeweiligen TIMx_IRQHandler),
+ * nicht per manuellem getNextARR()-Polling.
+ */
+
+#include "gpio.hh"
+#include "sigmoid_stepper.hh"
+#include "sigmoid_acceleration_profile_100_1000_5_170mhz.hh" // oder ein selbst generiertes Profil, s.u.
+
+// ============================================================================
+// BEISPIEL 1: Eine Achse, Default-Timer (TIM17)
+// ============================================================================
+
+/*
+static SigmoidStepper<> stepper(gpio::Pin::PA15, gpio::Pin::PD06, &profile_100_1000_5_170mhz);
+
+extern "C" void TIM17_IRQHandler(void) {
+    if (TIM17->SR & TIM_SR_UIF) {
+        TIM17->SR = (uint16_t)~TIM_SR_UIF;
+        stepper.Handle_update_interrupt_();
+    }
+}
+
+void setup() {
+    stepper.Init();               // konfiguriert STEP/DIR-Pins + Timer-Register
+    NVIC_SetPriority(TIM17_IRQn, 5);
+    NVIC_EnableIRQ(TIM17_IRQn);
+}
+
+void moveTo(int targetPosition) {
+    stepper.GotoPosition(targetPosition); // nicht-blockierend, laeuft im Hintergrund per ISR
+}
+
+// Abfragen jederzeit moeglich, auch waehrend eine Bewegung laeuft:
+//   stepper.IsMotionActive()
+//   stepper.GetCurrentPosition()
+*/
+
+// ============================================================================
+// BEISPIEL 2: Zwei Achsen gleichzeitig -- jede Achse braucht ihren EIGENEN Timer
+// (der Timer erzeugt die Step-Pulse per Update-Interrupt; zwei Achsen auf demselben Timer
+// wuerden sich gegenseitig ueberschreiben). TimerPeripheral ist ein Template-Parameter,
+// Default ist TIM17 -- fuer die zweite Achse explizit einen anderen Timer waehlen.
+// Siehe firmware_factory_control_unit/Core/Src/stepper_thread.cpp fuer ein vollstaendiges,
+// produktiv genutztes Beispiel mit TIM17 + TIM16.
+// ============================================================================
+
+/*
+static SigmoidStepper<gpio::Peripheral::TIM17_> stepper1(gpio::Pin::PA15, gpio::Pin::PD06, &profile_100_1000_5_170mhz);
+static SigmoidStepper<gpio::Peripheral::TIM16_> stepper2(gpio::Pin::PB04, gpio::Pin::PD07, &profile_100_1000_5_170mhz);
+
+extern "C" void TIM17_IRQHandler(void) {
+    if (TIM17->SR & TIM_SR_UIF) {
+        TIM17->SR = (uint16_t)~TIM_SR_UIF;
+        stepper1.Handle_update_interrupt_();
+    }
+}
+extern "C" void TIM16_IRQHandler(void) {
+    if (TIM16->SR & TIM_SR_UIF) {
+        TIM16->SR = (uint16_t)~TIM_SR_UIF;
+        stepper2.Handle_update_interrupt_();
+    }
+}
+
+void setup() {
+    stepper1.Init();
+    stepper2.Init();
+    NVIC_SetPriority(TIM17_IRQn, 5);
+    NVIC_EnableIRQ(TIM17_IRQn);
+    NVIC_SetPriority(TIM16_IRQn, 5);
+    NVIC_EnableIRQ(TIM16_IRQn);
+}
+*/
+
+// ============================================================================
+// ANLEITUNG: EIGENES BESCHLEUNIGUNGSPROFIL ERZEUGEN
+// ============================================================================
+
+/*
+1. sigmoid_approximation.py mit den gewuenschten Parametern ausfuehren -- WICHTIG:
+   --cpu-freq ist der TATSAECHLICHE Timer-Eingangstakt des Zielboards (z.B.
+   APB1TimFreq_Value/APB2TimFreq_Value aus dem CubeMX-.ioc, NICHT zwangslaeufig der
+   CPU-Kerntakt, falls beide auseinanderfallen -- auf vielen STM32 verdoppelt sich der
+   Timer-Takt gegenueber dem APB-Takt, sobald der APB-Prescaler != 1 ist). Ein fuer die
+   falsche Frequenz generiertes Profil liefert immer noch eine plausibel aussehende S-Kurve,
+   nur mit falscher absoluter Geschwindigkeit (Verhaeltnis = generierte_Frequenz /
+   tatsaechliche_Frequenz) -- das faellt beim blossen Draufschauen nicht auf:
+
+     python sigmoid_approximation.py --cpu-freq 160e6 --low-speed 100 --high-speed 1000 \
+         --accel-time 0.5 --no-plot
+
+   Erzeugt sigmoid_acceleration_profile_100_1000_5_160mhz.hh mit dem Profil-Objekt
+   profile_100_1000_5_160mhz (Name enthaelt jetzt bewusst die Taktfrequenz).
+
+2. Datei nach stm32_libs/sigmoid_stepper/ verschieben (falls woanders erzeugt) und im
+   Projekt einbinden -- kein manuelles Uebertragen von Tabellenwerten mehr noetig, die
+   generierte .hh-Datei ist bereits vollstaendig (siehe generate_cpp_header() im Skript).
+
+3. Im Firmware-Code:
+
+     #include "sigmoid_acceleration_profile_100_1000_5_160mhz.hh"
+
+     static SigmoidStepper<> stepper(gpio::Pin::PA15, gpio::Pin::PD06,
+                                      &profile_100_1000_5_160mhz);
+
+4. Vor dem Einbinden pruefen (das Skript gibt das beim Lauf mit aus):
+   - Prescaler liegt zwischen 0 und 65535
+   - Timer-Frequenz nach Prescaler / low_speed < 65535 (sonst ARR-Ueberlauf bei Start-Speed)
+*/

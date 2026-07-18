@@ -10,18 +10,12 @@
 
 #pragma once
 
+#include "IUsbPdEventHandler.h"
 #include "PDController.h"
 #include "PDSourceCapability.h"
 #include <cstddef>
-#include <functional>
 #include <memory>
 #include <vector>
-
-enum class PDSinkEventType {
-    sourceCapabilitiesChanged,
-    voltageChanged,
-    powerRejected
-};
 
 /**
  * Power Delivery Sink
@@ -38,11 +32,6 @@ public:
     * Checks if the power supply can provide the specified voltage.
     */    
     bool canProvideVoltage(int voltage);
-    /**
-     * Type of function that will be called when an event has occurred.
-     */
-    typedef std::function<void(PDSinkEventType eventType)> EventCallbackFunction;
-
     /**
      * @brief Tries to request the first available voltage from a priority-sorted list.
      *
@@ -68,12 +57,12 @@ public:
     /**
      * Starts USB Power Delivery as a power sink.
      *
-     * The callback function will be called when 'Loop()' is called and
+     * The handler's HandleUsbPDEvent() will be called when 'Loop()' is called and
      * an event has occurred since the last call of 'Loop()'.
      *
-     * @param callback event callback function
+     * @param handler event handler (implements IUsbPdEventHandler), or nullptr for none
      */
-    void start(EventCallbackFunction callback = nullptr);
+    void start(IUsbPdEventHandler* handler = nullptr);
 
     /**
      * Polls for new events.
@@ -149,7 +138,7 @@ private:
 
     bool isBusPowered;
 
-    EventCallbackFunction eventCallback;
+    IUsbPdEventHandler* eventHandler;
     int ppsIndex;
     int desiredVoltage;
     int desiredCurrent;

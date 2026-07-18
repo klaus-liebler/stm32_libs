@@ -7,13 +7,13 @@
 #include <array>
 
 /**
- * @file sigmoid_acceleration_profile_100_1000_5.hh
+ * @file sigmoid_acceleration_profile_100_1000_5_170mhz.hh
  * @brief Auto-generated Acceleration Profile
  * 
  * Profile Parameters:
  * - Speed Range: 100 -> 1000 steps/s
  * - Acceleration Time: 0.5 seconds
- * - CPU Frequency: 170.0 MHz
+ * - Timer Input Frequency: 170.0 MHz
  * - Prescaler: 25 (Timer Frequency: 6538461.54 Hz)
  * - Shift Bits: 10
  * - Segments: 48
@@ -21,7 +21,7 @@
  */
 
 // Lookup table with 48 segments
-constexpr std::array<AccelerationSegment, 48> segments_profile_100_1000_5 = {{
+constexpr std::array<AccelerationSegment, 48> segments_profile_100_1000_5_170mhz = {{
     {1, -402432},
     {1, -500736},
     {1, -617472},
@@ -75,7 +75,7 @@ constexpr std::array<AccelerationSegment, 48> segments_profile_100_1000_5 = {{
 
 
 // Profile instance for easy access
-constexpr SigmoidAccelerationProfile profile_100_1000_5(
+constexpr SigmoidAccelerationProfile profile_100_1000_5_170mhz(
     6538461,  // timer_freq_hz
     25,        // prescaler
     65383,      // initial_arr
@@ -83,5 +83,5 @@ constexpr SigmoidAccelerationProfile profile_100_1000_5(
     1000,  // target_speed_steps_per_s
     10,       // shift_bits
     548, // total_steps (accel + decel)
-    segments_profile_100_1000_5
+    segments_profile_100_1000_5_170mhz
 );

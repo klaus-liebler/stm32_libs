@@ -56,6 +56,37 @@ public:
     // IHOLD_IRUN fields: ihold/run in 0..31, iholddelay 0..15
     bool setIHoldIRun(uint8_t ihold, uint8_t irun, uint8_t iholddelay);
 
+    // Sensorless Homing per StallGuard: treibt den Motor ueber den internen
+    // Geschwindigkeitsgenerator (VACTUAL, s. GenerateSteps()) mit konstanter Geschwindigkeit,
+    // bis ein mechanischer Anschlag per StallGuard erkannt wird (SG_RESULT faellt unter
+    // sgthrs*2) -- kein Endschalter noetig. Aktiviert waehrend der Fahrt CoolStep (lastabhaengige
+    // automatische Stromabsenkung, s. EnableCoolStep()), damit der Motor nicht unnoetig heiss
+    // laeuft, waehrend er ggf. laenger gegen den Anschlag drueckt; schaltet danach wieder auf
+    // StealthChop zurueck (CoolStep braucht SpreadCycle, das ist also bewusst nur waehrend des
+    // Homings aktiv, nicht im Normalbetrieb).
+    // Setzt current_position_ einer begleitenden SigmoidStepper-Instanz NICHT selbst zurueck
+    // (kennt sie nicht) -- das macht der Aufrufer per SigmoidStepper::SetCurrentPosition() nach
+    // einer true-Rueckgabe.
+    // @param homingSpeedFullStepsPerSecond Geschwindigkeit waehrend der Fahrt (Vorzeichen = Richtung)
+    // @param sgthrs StallGuard-Schwelle (0..255): hoehere Werte = empfindlicher, erkennt einen Stall frueher/leichter
+    // @param timeoutMs Sicherheits-Timeout, falls kein Stall erkannt wird
+    // @return true wenn ein Stall erkannt wurde, false bei Timeout oder Kommunikationsfehler
+    bool HomeSensorless(int homingSpeedFullStepsPerSecond, uint8_t sgthrs = 100, uint32_t timeoutMs = 10000, uint32_t travelOppositeMs = 800, uint32_t homingDeadTimeMs = 300);
+
+    // Nicht blockierende Variante von HomeSensorless() fuer Aufrufer, die aus einem gemeinsamen
+    // Loop()/Tick-Kontext heraus arbeiten und nicht Sekunden lang blockieren duerfen (z.B. ein
+    // IO-Thread, der auch andere Sensoren/Aktoren bedient). StartHomingNonBlocking() stoesst nur
+    // die erste Phase an (nicht blockierend) und liefert sofort zurueck; TickHoming(now_ms) muss
+    // danach bei jedem Zyklus (now_ms = HAL_GetTick()) erneut aufgerufen werden, bis etwas
+    // anderes als InProgress zurueckkommt. Dieselben Phasen wie HomeSensorless() (Gegenfahrt,
+    // Einschwingzeit, Totzeit, StallGuard-Polling), nur zeitgesteuert statt per HAL_Delay().
+    // Setzt current_position_ einer begleitenden SigmoidStepper-Instanz NICHT selbst zurueck
+    // (kennt sie nicht) -- das macht der Aufrufer per SigmoidStepper::SetCurrentPosition() nach
+    // einem Success-Ergebnis.
+    enum class HomingResult { InProgress, Success, Timeout, Error };
+    bool StartHomingNonBlocking(int homingSpeedFullStepsPerSecond, uint8_t sgthrs = 100, uint32_t timeoutMs = 10000, uint32_t travelOppositeMs = 800, uint32_t homingDeadTimeMs = 300);
+    HomingResult TickHoming(uint32_t now_ms);
+
 private:
     UART_HandleTypeDef* huart_;
     uint8_t addr_; // 0..15
@@ -66,6 +97,15 @@ private:
     uint8_t last_sgthrs_ = 0;
     uint32_t last_coolconf_ = 0;
     bool coolstep_configured_ = false;
+
+    enum class HomingPhase { Idle, OppositeTravel, Settle, DeadTime, StallDetect };
+    HomingPhase homing_phase_ = HomingPhase::Idle;
+    uint32_t homing_phase_start_ms_ = 0;
+    int homing_speed_ = 0;
+    uint8_t homing_sgthrs_ = 0;
+    uint32_t homing_timeout_ms_ = 0;
+    uint32_t homing_travel_opposite_ms_ = 0;
+    uint32_t homing_dead_time_ms_ = 0;
 
     bool fetchImportantRegistersForLocalMirroring();
     bool clearGStat(const char* error_msg);
