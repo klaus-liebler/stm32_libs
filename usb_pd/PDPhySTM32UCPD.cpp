@@ -25,6 +25,7 @@
 #endif
 #include "PDController.h"
 #include "PDPhySTM32UCPD.h"
+#include "hw_config_assert.hh"
 
 // STM32H5 uses the GPDMA controller (different LL_DMA_InitTypeDef layout/API than
 // STM32G4's classic DMA1+DMAMUX) - see the two LL_DMA_InitTypeDef blocks in init() below,
@@ -248,6 +249,10 @@ void PDPhySTM32UCPD::init(bool isMonitor) {
     NVIC_SetPriority(UCPD_IRQ, NVIC_GetPriority(schedulerIrq));
     // enable interrupt handler
     NVIC_EnableIRQ(UCPD_IRQ);
+
+    // Selbstkonsistenz-Check: faengt z.B. eine falsche Priority-Grouping-Konfiguration ab, bei
+    // der NVIC_EnableIRQ() die Freigabe still nicht wirksam werden laesst.
+    HW_CONFIG_ASSERT(NVIC_GetEnableIRQ(UCPD_IRQ) != 0, "UCPD NVIC-Interrupt nach NVIC_EnableIRQ() nicht aktiv");
 }
 
 void PDPhy::prepareRead(PDMessage* msg) {

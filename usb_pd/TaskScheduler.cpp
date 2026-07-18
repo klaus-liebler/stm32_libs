@@ -4,6 +4,7 @@
 #include "log.h"
 #include "hal_header_selector.h"
 #include "common.hh"
+#include "hw_config_assert.hh"
 //#define USE_TIMER6_FOR_SCHEDULER
 #define USE_TIMER7_FOR_SCHEDULER
 
@@ -73,6 +74,10 @@ void TaskScheduler::start() {
     HAL_NVIC_SetPriority(SCHEDULER_TIMER_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(SCHEDULER_TIMER_IRQn);
 
+    // Selbstkonsistenz-Check: faengt z.B. eine falsche Priority-Grouping-Konfiguration ab, bei
+    // der NVIC_EnableIRQ() die Freigabe still nicht wirksam werden laesst.
+    HW_CONFIG_ASSERT(NVIC_GetEnableIRQ(SCHEDULER_TIMER_IRQn) != 0,
+                      SCHEDULER_TIMER_NAME " NVIC-Interrupt nach NVIC_EnableIRQ() nicht aktiv");
 }
 
 void TaskScheduler::scheduleTaskAfter(TaskFunction task, uint32_t delay) {

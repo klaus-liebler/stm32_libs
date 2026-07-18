@@ -3,6 +3,7 @@
 #include "log.h"
 #include "main.h"
 #include "hal_header_selector.h"
+#include "hw_config_assert.hh"
 
 #include <array>
 #include <cmath>
@@ -111,12 +112,17 @@ public:
 
 void Setup(void) {
   log_info("Starting SPI HX711 setup");
+  // Beim Bringup laut anhalten statt erst per ERROR-Status im laufenden Betrieb zu bemerken,
+  // dass gar kein SPI-Handle uebergeben wurde (z.B. HX711<8> mit falschem/nicht initialisiertem
+  // Handle instanziiert). Der folgende if-Zweig bleibt fuer den Produktions-/Release-Fall
+  // (HW_CONFIG_ASSERT() dort ein No-Op) als graceful degradation bestehen.
+  HW_CONFIG_ASSERT(hspi != nullptr, "HX711: SPI-Handle ist null");
   if (hspi == nullptr) {
     log_error("SPI handle is null");
     readout_state = ReadoutState::ERROR;
     return;
   }
-  
+
   //Fire an initial dummy read to set the MOSI line to the correct idle state (LOW) before the first real readout cycle starts.
   uint8_t dummy_tx[4] = {0};
   HAL_SPI_Transmit(hspi, dummy_tx, 4, HAL_MAX_DELAY);

@@ -3,6 +3,7 @@
 #include "gpio.hh"
 #include "log.h"
 #include "tmc2209_reg.hpp"
+#include "hw_config_assert.hh"
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -93,6 +94,14 @@ bool TMC2209::ShaftTurnReversed(bool reversed) {
  */
 bool TMC2209::InitForNormalSpeedAndUartBasedOperation(
     bool usePotimeterForCurrentScaling, bool disable_read, MicroStepResolution resolution) {
+  // UART-FIFO muss aktiv sein: ohne FIFO hat die UART nur ein 1-Byte-Schieberegister, das bei
+  // 115200 Baud (~87us/Byte) unter ThreadX-Scheduling/Interrupt-Konkurrenz zuverlaessig zu
+  // stillen Overruns fuehrt (TX/RX-Timeout ohne erkennbaren Fehler -- s. main.c,
+  // MX_UART5_Init()/USER-CODE-Kommentar zu genau diesem Symptom). Der 8-Byte-FIFO gibt
+  // deutlich mehr Puffer gegen ISR-Jitter. Nur in Debug-Builds aktiv (HW_CONFIG_ASSERT).
+  HW_CONFIG_ASSERT(huart_->FifoMode == UART_FIFOMODE_ENABLE,
+                    "TMC2209: UART-FIFO ist nicht aktiviert (CubeMX: UARTx -> Advanced Parameters -> FIFO Mode -> Enable)");
+
   // Optionally, perform any initialization here
   enable();
   if(!disable_read) {
