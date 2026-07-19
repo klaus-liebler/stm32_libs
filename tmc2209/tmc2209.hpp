@@ -31,7 +31,12 @@ class TMC2209 {
 public:
     // address: 0..15 (MSB used for read flag internally)
     // Optional EN pin: pass Pin::NO_PIN to disable GPIO control
-    TMC2209(UART_HandleTypeDef* huart, uint8_t address, gpio::Pin enPin = gpio::Pin::NO_PIN);
+    // name: kurzer Bezeichner fuer Log-Ausgaben (z.B. "S1 - Sorter"), um bei mehreren
+    // TMC2209-Instanzen am selben UART-Bus in den Logs unterscheiden zu koennen, welche
+    // Instanz eine Meldung ausgegeben hat. Der Zeiger wird nur gehalten, nicht kopiert -- muss
+    // also mindestens so lange gueltig bleiben wie das TMC2209-Objekt (ein String-Literal an
+    // der Aufrufstelle reicht dafuer aus).
+    TMC2209(UART_HandleTypeDef* huart, uint8_t address, gpio::Pin enPin = gpio::Pin::NO_PIN, const char* name = "TMC2209");
 
     bool InitForNormalSpeedAndUartBasedOperation(bool usePotentiometerForCurrentScaling = false, bool disable_read = false,  MicroStepResolution resolution = MicroStepResolution::RES256);
     bool ShaftTurnReversed(bool reversed);
@@ -91,6 +96,7 @@ private:
     UART_HandleTypeDef* huart_;
     uint8_t addr_; // 0..15
     gpio::Pin en_;
+    const char* name_;
     REG_FIELD::GCONF gconf;
     REG_FIELD::CHOPCONF chopconf;
     uint32_t last_tcoolthrs_ = 0;

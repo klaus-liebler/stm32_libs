@@ -153,9 +153,16 @@ void loop(void) {
         HAL_StatusTypeDef res = HAL_SPI_TransmitReceive(hspi, (uint8_t*) (&TxData), (uint8_t*) (&RxData),
                                                          sizeof(TxData), 100);
         if (res != HAL_OK) {
-          log_warn("HX711: SPI-Transfer fehlgeschlagen: status=%d state=%lu err=0x%08lX",
+          // Bisher liess ein einzelner fehlgeschlagener Transfer den State dauerhaft auf ERROR
+          // stehen (nie wieder gelesen, nur noch Log-Spam) -- das schlug tatsaechlich zu, sobald
+          // z.B. ein Webseiten-Reload kurz viele ETH-DMA-Interrupts (Prioritaet 0, hoechste im
+          // System) erzeugte und den io_thread laenger als das 100ms-SPI-Timeout verdraengte
+          // (status=HAL_TIMEOUT=3, err=HAL_SPI_ERROR_TIMEOUT=0x100 -- kein echter SPI-Fehler).
+          // Ein einzelner Timeout ist transient: naechster Zyklus (50ms spaeter) einfach erneut
+          // versuchen, statt den Sensor fuer den Rest der Laufzeit stillzulegen.
+          log_warn("HX711: SPI-Transfer fehlgeschlagen: status=%d state=%lu err=0x%08lX -- naechster Versuch im naechsten Zyklus",
                    (int)res, (unsigned long)hspi->State, (unsigned long)hspi->ErrorCode);
-          readout_state = ReadoutState::ERROR;
+          readout_state = ReadoutState::WAIT_FOR_DATA_READY;
         } else {
           log_debug("HX711: SPI-Transfer erfolgreich");
           convertArrayToUint32AndUpdateLastReading();

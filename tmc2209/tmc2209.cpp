@@ -14,20 +14,20 @@
 namespace tmc2209 {
 
   
-  bool TMC2209::checkedWriteRegister(RegIdx reg, uint32_t value, const char* error_msg){                                   
-    if (!writeRegister(reg, value)) {       
-      log_error(error_msg);                                        
-      return false;                                                            
+  bool TMC2209::checkedWriteRegister(RegIdx reg, uint32_t value, const char* error_msg){
+    if (!writeRegister(reg, value)) {
+      log_error("%s: %s", name_, error_msg);
+      return false;
     }
-    return true;                                                                          
-  } 
+    return true;
+  }
 
-  bool TMC2209::checkedReadRegister(RegIdx reg, uint32_t& value, const char* error_msg){                                   
-    if (!readRegister(reg, value)) {                                          
-      log_error(error_msg);                                        
-      return false;                                                           
-    }       
-    return true;                                                                   
+  bool TMC2209::checkedReadRegister(RegIdx reg, uint32_t& value, const char* error_msg){
+    if (!readRegister(reg, value)) {
+      log_error("%s: %s", name_, error_msg);
+      return false;
+    }
+    return true;
   }
 
   bool TMC2209::clearGStat(const char* error_msg) {
@@ -54,25 +54,41 @@ uint8_t TMC2209::crc8(uint8_t *datagram, size_t datagram_size_with_crc) {
   return crc;
 }
 
-TMC2209::TMC2209(UART_HandleTypeDef *huart, uint8_t address, gpio::Pin enPin)
-    : huart_(huart), addr_(address & 0x0F), en_(enPin) {}
+TMC2209::TMC2209(UART_HandleTypeDef *huart, uint8_t address, gpio::Pin enPin, const char* name)
+    : huart_(huart), addr_(address & 0x0F), en_(enPin), name_(name) {}
+
+// Bestaetigte Ursache der ThreadX-Kontext-UART-Timeouts (s. readRegister()-Diagnose, die per
+// Timeout eingefrorenen gState/RxState/ErrorCode/ISR-Snapshots inkl. RxXferCount und
+// Rohbytes): Timeouts traten ausschliesslich unmittelbar NACH einer vorherigen UART-Transaktion
+// (Read oder Write) ohne jede Pause dazwischen auf -- mal mit korrupter eigener
+// Echo-Synchronisation (nur Bruchstuecke des Echos kommen an), mal mit sauber empfangenem Echo,
+// aber ganz ohne Chip-Antwort. Beides passt zu "Sender/Empfaenger (STM32-Seite oder TMC2209) hat
+// sich von der vorherigen Transaktion noch nicht erholt" -- im bare-metal-Boot (vor
+// tx_kernel_enter()) gab es durch langsamere/blockierende Debug-Ausgaben zufaellig immer genug
+// Abstand zwischen zwei Transaktionen, im ThreadX-IO-Thread (schnellere, gequeuete Logs) nicht
+// mehr. Eine kurze Pause vor jeder Transaktion, die direkt auf eine andere folgt, hat das
+// Problem in Tests vollstaendig behoben -- KEINE Aenderung an readRegister()/writeRegister()
+// selbst (bleiben IT-basiert).
+constexpr uint32_t INTER_TRANSACTION_DELAY_MS = 2;
 
 bool TMC2209::fetchImportantRegistersForLocalMirroring() {
-  
+
   // Verify communication by reading the IOIN register
   REG_FIELD::IOIN ioin;
   checkedReadRegister(RegIdx::IOIN, ioin.U32,
                  "Failed to read IOIN register during init");
   if (ioin.REG.version != 0x21) {
-    log_error("TMC2209: Unexpected chip version 0x%02X",
+    log_error("%s: Unexpected chip version 0x%02X", name_,
               (unsigned int)ioin.REG.version);
     return false;
   }
 
+  HAL_Delay(INTER_TRANSACTION_DELAY_MS);
   uint32_t val = 0;
   checkedReadRegister(RegIdx::GCONF, val,
                  "Failed to read GCONF register for local mirroring");
   gconf.U32 = val;
+  HAL_Delay(INTER_TRANSACTION_DELAY_MS);
   checkedReadRegister(RegIdx::CHOPCONF, val,
                  "Failed to read CHOPCONF register for local mirroring");
   chopconf.U32 = val;
@@ -110,6 +126,7 @@ bool TMC2209::InitForNormalSpeedAndUartBasedOperation(
     }
   }
 
+  HAL_Delay(INTER_TRANSACTION_DELAY_MS);
   if (!clearGStat("Failed to clear GSTAT before init")) {
     return false;
   }
@@ -131,6 +148,7 @@ bool TMC2209::InitForNormalSpeedAndUartBasedOperation(
   }
 
   if (!disable_read) {
+    HAL_Delay(INTER_TRANSACTION_DELAY_MS);
     uint32_t gconf_readback = 0;
     if (!checkedReadRegister(RegIdx::GCONF, gconf_readback,
                     "Failed to verify GCONF register during init")) {
@@ -138,12 +156,13 @@ bool TMC2209::InitForNormalSpeedAndUartBasedOperation(
     }
     constexpr uint32_t gconf_mask = 0x000003FF;
     if ((gconf_readback & gconf_mask) != (gconf.U32 & gconf_mask)) {
-      log_error("TMC2209: GCONF verification failed. Wrote 0x%08X, read back 0x%08X",
+      log_error("%s: GCONF verification failed. Wrote 0x%08X, read back 0x%08X", name_,
                 (unsigned int)gconf.U32, (unsigned int)gconf_readback);
       return false;
     }
   }
 if(resolution != MicroStepResolution::RES256){
+  HAL_Delay(INTER_TRANSACTION_DELAY_MS);
   chopconf.REG.mres = static_cast<uint32_t>(resolution);
   if (!checkedWriteRegister(RegIdx::CHOPCONF, chopconf.U32,
                   "Failed to write CHOPCONF register during init")) {
@@ -153,6 +172,7 @@ if(resolution != MicroStepResolution::RES256){
 }
 
 
+  HAL_Delay(INTER_TRANSACTION_DELAY_MS);
   if (!clearGStat("Failed to clear GSTAT after init")) {
     return false;
   }
@@ -170,11 +190,12 @@ if(resolution != MicroStepResolution::RES256){
   // writeRegister() bestaetigt nur den erfolgreichen UART-Versand, nicht die tatsaechliche
   // Anwendung durch den Chip. Deshalb hier zur Diagnose ("Sigmoid-Test bewegt nichts") aktiv
   // zurueckgelesen und geloggt.
+  HAL_Delay(INTER_TRANSACTION_DELAY_MS);
   uint32_t vactual_check = 0xDEADBEEF;
   if (readRegister(RegIdx::VACTUAL, vactual_check)) {
-    log_info("TMC2209: VACTUAL nach Reset = %ld (sollte 0 sein)", (long)(int32_t)vactual_check);
+    log_info("%s: VACTUAL nach Reset = %ld (sollte 0 sein)", name_, (long)(int32_t)vactual_check);
   } else {
-    log_warn("TMC2209: VACTUAL-Ruecklesen nach Reset fehlgeschlagen");
+    log_warn("%s: VACTUAL-Ruecklesen nach Reset fehlgeschlagen", name_);
   }
 
   return true;
@@ -251,7 +272,7 @@ bool TMC2209::EnableCoolStep(uint32_t tcoolthrs, uint8_t sgthrs,
                              uint8_t semax, uint8_t sedn,
                              bool seimin) {
   if (semin > 0x0F || seup > 0x03 || semax > 0x0F || sedn > 0x03) {
-    log_error("EnableCoolStep: Invalid COOLCONF field value");
+    log_error("%s: EnableCoolStep: Invalid COOLCONF field value", name_);
     return false;
   }
 
@@ -294,10 +315,10 @@ bool TMC2209::EnableCoolStep(uint32_t tcoolthrs, uint8_t sgthrs,
   coolstep_configured_ = true;
 
   if (semin == 0) {
-    log_error("EnableCoolStep: semin is 0, CoolStep stays disabled");
+    log_error("%s: EnableCoolStep: semin is 0, CoolStep stays disabled", name_);
   }
 
-  log_info("CoolStep configured: TCOOLTHRS=%lu SGTHRS=%u COOLCONF=0x%08lX",
+  log_info("%s: CoolStep configured: TCOOLTHRS=%lu SGTHRS=%u COOLCONF=0x%08lX", name_,
            (unsigned long)tcoolthrs, (unsigned int)sgthrs,
            (unsigned long)coolconf.U32);
   return true;
@@ -339,7 +360,7 @@ bool TMC2209::LogCoolStepRuntimeStatus() {
 
 void TMC2209::PrintPrettyFullSystemState() {
     log_info("================================================");
-    log_info("TMC2209: Full System State:");
+    log_info("%s: Full System State:", name_);
     log_info("================================================");
     // GCONF Register
     if (readRegister(RegIdx::GCONF, this->gconf.U32)) {
@@ -464,11 +485,11 @@ bool TMC2209::writeRegister(RegIdx reg, uint32_t value, uint32_t timeoutMs) {
   HAL_StatusTypeDef res = HAL_UART_Transmit(
       huart_, const_cast<uint8_t *>(frame), sizeof(frame), timeoutMs);
   if (res != HAL_OK) {
-    log_warn("TMC2209: Write Reg 0x%02X - TX failed with %d", (unsigned int)reg,
+    log_warn("%s: Write Reg 0x%02X - TX failed with %d", name_, (unsigned int)reg,
              (int)res);
     return false;
   }
-  log_debug("TMC2209: Write Reg 0x%02X - TX OK", (unsigned int)reg);
+  log_debug("%s: Write Reg 0x%02X - TX OK", name_, (unsigned int)reg);
   return true;
 }
 
@@ -496,14 +517,14 @@ bool TMC2209::readRegister(RegIdx reg, uint32_t &value, uint32_t timeoutMs, bool
   // Start RX first to be ready when response arrives, then TX request
   HAL_StatusTypeDef res = HAL_UART_Receive_IT(huart_, resp, sizeof(resp));
   if (res != HAL_OK) {
-    log_warn("TMC2209: Read Reg 0x%02X - RX IT failed with %d",
+    log_warn("%s: Read Reg 0x%02X - RX IT failed with %d", name_,
              (unsigned int)reg, (int)res);
     return false;
   }
 
   res = HAL_UART_Transmit_IT(huart_, const_cast<uint8_t *>(req), sizeof(req));
   if (res != HAL_OK) {
-    log_warn("TMC2209: Read Reg 0x%02X - TX IT failed with %d",
+    log_warn("%s: Read Reg 0x%02X - TX IT failed with %d", name_,
              (unsigned int)reg, (int)res);
     return false;
   }
@@ -513,8 +534,35 @@ bool TMC2209::readRegister(RegIdx reg, uint32_t &value, uint32_t timeoutMs, bool
   while ((huart_->gState != HAL_UART_STATE_READY) ||
          (huart_->RxState != HAL_UART_STATE_READY)) {
     if ((HAL_GetTick() - tickStart) > timeoutMs) {
+      // Snapshot vor dem Abort einfrieren -- HAL_UART_AbortReceive_IT() setzt RxState zurueck
+      // und kann ISR-Fehlerflags mit loeschen, das wuerde die Diagnose sonst zunichtemachen.
+      const uint32_t isr_snapshot = huart_->Instance->ISR;
+      const uint32_t gstate_snapshot = static_cast<uint32_t>(huart_->gState);
+      const uint32_t rxstate_snapshot = static_cast<uint32_t>(huart_->RxState);
+      const uint32_t error_snapshot = huart_->ErrorCode;
+      // RxXferCount ist die noch AUSSTEHENDE Byte-Anzahl (nicht die bereits empfangene) --
+      // sizeof(resp) - RxXferCount verraet also, wie viele der 12 erwarteten Bytes (4 Echo + 8
+      // Antwort) tatsaechlich angekommen sind. resp[] selbst enthaelt exakt diese bereits
+      // empfangenen Bytes (HAL schreibt direkt in den Zielpuffer, byteweise, sobald sie
+      // eintreffen) -- der Rest ist noch der memset(0)-Ausgangswert von oben.
+      const uint32_t rx_remaining = huart_->RxXferCount;
+      const uint32_t rx_received = sizeof(resp) - rx_remaining;
       HAL_UART_AbortReceive_IT(huart_);
-      log_warn("TMC2209: Read Reg 0x%02X - TX/RX timeout", (unsigned int)reg);
+      log_warn("%s: Read Reg 0x%02X - TX/RX timeout (gState=0x%02X RxState=0x%02X ErrorCode=0x%02X "
+               "ISR=0x%04X%s%s%s%s%s%s%s%s, rx=%lu/%u bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X)",
+               name_, (unsigned int)reg, (unsigned int)gstate_snapshot, (unsigned int)rxstate_snapshot,
+               (unsigned int)error_snapshot, (unsigned int)isr_snapshot,
+               (isr_snapshot & USART_ISR_ORE) ? " ORE" : "",
+               (isr_snapshot & USART_ISR_FE) ? " FE" : "",
+               (isr_snapshot & USART_ISR_NE) ? " NE" : "",
+               (isr_snapshot & USART_ISR_PE) ? " PE" : "",
+               (isr_snapshot & USART_ISR_IDLE) ? " IDLE" : "",
+               (isr_snapshot & USART_ISR_RXNE) ? " RXNE-pending" : "",
+               (isr_snapshot & USART_ISR_TXE) ? " TXE-pending" : "",
+               (isr_snapshot & USART_ISR_TC) ? " TC-pending" : "",
+               (unsigned long)rx_received, (unsigned int)sizeof(resp),
+               resp[0], resp[1], resp[2], resp[3], resp[4], resp[5],
+               resp[6], resp[7], resp[8], resp[9], resp[10], resp[11]);
       return false;
     }
   }
@@ -524,7 +572,7 @@ bool TMC2209::readRegister(RegIdx reg, uint32_t &value, uint32_t timeoutMs, bool
 
   // Basic validation
   if (checkStartByte && pResp[0] != 0x05) {
-    log_warn("TMC2209: Read Reg 0x%02X - Invalid start byte (expected 0x05). Received: 0x%02X %02X %02X %02X %02X %02X %02X %02X",
+    log_warn("%s: Read Reg 0x%02X - Invalid start byte (expected 0x05). Received: 0x%02X %02X %02X %02X %02X %02X %02X %02X", name_,
              (unsigned int)reg, (unsigned int)pResp[0], (unsigned int)pResp[1],
              (unsigned int)pResp[2], (unsigned int)pResp[3], (unsigned int)pResp[4],
              (unsigned int)pResp[5], (unsigned int)pResp[6], (unsigned int)pResp[7]);
@@ -533,14 +581,14 @@ bool TMC2209::readRegister(RegIdx reg, uint32_t &value, uint32_t timeoutMs, bool
 
   // TMC2209 replies use 0xFF as address in UART single-wire mode; accept it unconditionally
   if (pResp[1] != 0xFF) {
-    log_warn("TMC2209: Read Reg 0x%02X - Address mismatch (expected broadcast 0xFF). Received: 0x%02X %02X %02X %02X %02X %02X %02X %02X",
+    log_warn("%s: Read Reg 0x%02X - Address mismatch (expected broadcast 0xFF). Received: 0x%02X %02X %02X %02X %02X %02X %02X %02X", name_,
              (unsigned int)reg, (unsigned int)pResp[0], (unsigned int)pResp[1],
              (unsigned int)pResp[2], (unsigned int)pResp[3], (unsigned int)pResp[4],
              (unsigned int)pResp[5], (unsigned int)pResp[6], (unsigned int)pResp[7]);
     return false;
   }
   if (pResp[2] != static_cast<uint8_t>(reg)) {
-    log_warn("TMC2209: Read Reg 0x%02X - Register mismatch. Received: 0x%02X %02X %02X %02X %02X %02X %02X %02X",
+    log_warn("%s: Read Reg 0x%02X - Register mismatch. Received: 0x%02X %02X %02X %02X %02X %02X %02X %02X", name_,
              (unsigned int)reg, (unsigned int)pResp[0], (unsigned int)pResp[1],
              (unsigned int)pResp[2], (unsigned int)pResp[3], (unsigned int)pResp[4],
              (unsigned int)pResp[5], (unsigned int)pResp[6], (unsigned int)pResp[7]);
@@ -549,7 +597,7 @@ bool TMC2209::readRegister(RegIdx reg, uint32_t &value, uint32_t timeoutMs, bool
   const uint8_t rx_crc = pResp[7];
   const uint8_t expected_crc = crc8(pResp, 8);
   if (rx_crc != expected_crc) {
-    log_warn("TMC2209: Read Reg 0x%02X - CRC mismatch (expected 0x%02X). Received: 0x%02X %02X %02X %02X %02X %02X %02X %02X",
+    log_warn("%s: Read Reg 0x%02X - CRC mismatch (expected 0x%02X). Received: 0x%02X %02X %02X %02X %02X %02X %02X %02X", name_,
              (unsigned int)reg, (unsigned int)expected_crc, (unsigned int)pResp[0], (unsigned int)pResp[1],
              (unsigned int)pResp[2], (unsigned int)pResp[3], (unsigned int)pResp[4], (unsigned int)pResp[5],
              (unsigned int)pResp[6], (unsigned int)pResp[7]);
@@ -560,7 +608,7 @@ bool TMC2209::readRegister(RegIdx reg, uint32_t &value, uint32_t timeoutMs, bool
           (static_cast<uint32_t>(pResp[4]) << 16) |
           (static_cast<uint32_t>(pResp[5]) << 8) |
           (static_cast<uint32_t>(pResp[6]));
-  log_debug("TMC2209: Read Reg 0x%02X = 0x%08X", (unsigned int)reg,
+  log_debug("%s: Read Reg 0x%02X = 0x%08X", name_, (unsigned int)reg,
          (unsigned int)value);
   return true;
 }
@@ -605,23 +653,23 @@ bool TMC2209::GenerateSteps(int fullStepsPerSecond) {
       fullStepsPerSecond * t *
       256; // VACTUAL = velocity in steps/s * 256 * (2^24 / f_CLK)
 
-  log_info("Writing VACTUAL register with value %d", vactualUnion.i32);
+  log_info("%s: Writing VACTUAL register with value %d", name_, vactualUnion.i32);
   if (!writeRegister(RegIdx::VACTUAL, vactualUnion.u32)) {
-    log_error("TMC2209: Failed to write VACTUAL register");
+    log_error("%s: Failed to write VACTUAL register", name_);
     return false;
   }
 
   // Read back key runtime registers to verify that velocity mode is actually active.
   uint32_t vactual_readback = 0;
   if (readRegister(RegIdx::VACTUAL, vactual_readback, 200, false)) {
-    log_info("TMC2209: VACTUAL readback = 0x%08X (%ld)",
+    log_info("%s: VACTUAL readback = 0x%08X (%ld)", name_,
              (unsigned int)vactual_readback,
              (long)static_cast<int32_t>(vactual_readback));
   }
 
   REG_FIELD::DRV_STATUS drv_status{};
   if (readRegister(RegIdx::DRV_STATUS, drv_status.U32, 200, false)) {
-    log_info("TMC2209: DRV_STATUS after VACTUAL = 0x%08X (standstill=%u, cs=%u)",
+    log_info("%s: DRV_STATUS after VACTUAL = 0x%08X (standstill=%u, cs=%u)", name_,
              (unsigned int)drv_status.U32,
              (unsigned int)drv_status.REG.standstill,
              (unsigned int)drv_status.REG.current_scaling);
@@ -629,12 +677,12 @@ bool TMC2209::GenerateSteps(int fullStepsPerSecond) {
 
   uint32_t tstep = 0;
   if (readRegister(RegIdx::TSTEP, tstep, 200, false)) {
-    log_info("TMC2209: TSTEP after VACTUAL = %u", (unsigned int)tstep);
+    log_info("%s: TSTEP after VACTUAL = %u", name_, (unsigned int)tstep);
   }
 
   uint32_t mscnt = 0;
   if (readRegister(RegIdx::MSCNT, mscnt, 200, false)) {
-    log_info("TMC2209: MSCNT after VACTUAL = %u", (unsigned int)(mscnt & 0x3FF));
+    log_info("%s: MSCNT after VACTUAL = %u", name_, (unsigned int)(mscnt & 0x3FF));
 
     HAL_Delay(50);
     uint32_t mscnt_later = 0;
@@ -642,7 +690,7 @@ bool TMC2209::GenerateSteps(int fullStepsPerSecond) {
       const uint16_t m0 = static_cast<uint16_t>(mscnt & 0x3FF);
       const uint16_t m1 = static_cast<uint16_t>(mscnt_later & 0x3FF);
       const uint16_t delta = static_cast<uint16_t>((m1 + 1024U - m0) % 1024U);
-      log_info("TMC2209: MSCNT after 50ms = %u (delta=%u)",
+      log_info("%s: MSCNT after 50ms = %u (delta=%u)", name_,
                (unsigned int)m1,
                (unsigned int)delta);
     }
@@ -651,7 +699,7 @@ bool TMC2209::GenerateSteps(int fullStepsPerSecond) {
 }
 
 bool TMC2209::HomeSensorless(int homingSpeedFullStepsPerSecond, uint8_t sgthrs, uint32_t timeoutMs, uint32_t travelOppositeMs, uint32_t homingDeadTimeMs) {
-  log_info("TMC2209: Starting sensorless homing (speed=%d full steps/s, sgthrs=%u, timeout=%lu ms)",
+  log_info("%s: Starting sensorless homing (speed=%d full steps/s, sgthrs=%u, timeout=%lu ms)", name_,
            homingSpeedFullStepsPerSecond, (unsigned int)sgthrs, (unsigned long)timeoutMs);
 
   // CoolStep braucht SpreadCycle (s. EnableCoolStep()) -- fuer die Dauer des Homings aktiviert,
@@ -659,7 +707,7 @@ bool TMC2209::HomeSensorless(int homingSpeedFullStepsPerSecond, uint8_t sgthrs, 
   // auch StallGuard (SG_RESULT, fuer die Stall-Erkennung unten) verfuegbar sind. Defaultwerte
   // von EnableCoolStep() bis auf sgthrs unveraendert uebernommen.
   if (!EnableCoolStep(/*tcoolthrs=*/450, sgthrs)) {
-    log_error("TMC2209: Failed to enable CoolStep for homing");
+    log_error("%s: Failed to enable CoolStep for homing", name_);
     return false;
   }
 
@@ -671,14 +719,14 @@ bool TMC2209::HomeSensorless(int homingSpeedFullStepsPerSecond, uint8_t sgthrs, 
   // Schrittzahl/"einiger Umdrehungen": existiert IN DIESER Richtung ebenfalls ein Anschlag, ist
   // die Blockierdauer dadurch trotzdem begrenzt, nicht unbegrenzt. CoolStep ist zu diesem
   // Zeitpunkt bereits aktiv, begrenzt den Strom also auch hier.
-  log_info("Pre-homing opposite direction travel for %lu ms", (unsigned long)travelOppositeMs);
+  log_info("%s: Pre-homing opposite direction travel for %lu ms", name_, (unsigned long)travelOppositeMs);
   GenerateSteps(-homingSpeedFullStepsPerSecond);
   HAL_Delay(travelOppositeMs);
   GenerateSteps(0);
   HAL_Delay(50); // kurze Pause, bis der Motor sicher zum Stillstand gekommen ist
-  log_info("Pre-homing opposite direction travel complete, starting homing motion");
+  log_info("%s: Pre-homing opposite direction travel complete, starting homing motion", name_);
   if (!GenerateSteps(homingSpeedFullStepsPerSecond)) {
-    log_error("TMC2209: Failed to start homing motion");
+    log_error("%s: Failed to start homing motion", name_);
     // GCONF auch bei fehlgeschlagenem Start wieder auf StealthChop zuruecksetzen (s.u.).
     gconf.REG.enable_spread_cycle = 0;
     checkedWriteRegister(RegIdx::GCONF, gconf.U32, "Failed to restore StealthChop after failed homing start");
@@ -694,7 +742,7 @@ bool TMC2209::HomeSensorless(int homingSpeedFullStepsPerSecond, uint8_t sgthrs, 
   // tatsaechlich bereits blockierter Motor den Stall dagegen sofort beim ersten echten
   // SG_RESULT-Wert, nicht erst nach dem vollen Timeout.
   HAL_Delay(homingDeadTimeMs);
-  log_info("Homing dead time of %lu ms complete, starting stall detection", (unsigned long)homingDeadTimeMs);
+  log_info("%s: Homing dead time of %lu ms complete, starting stall detection", name_, (unsigned long)homingDeadTimeMs);
   const uint32_t start = HAL_GetTick();
   bool stalled = false;
   while ((HAL_GetTick() - start) < timeoutMs) {
@@ -718,19 +766,19 @@ bool TMC2209::HomeSensorless(int homingSpeedFullStepsPerSecond, uint8_t sgthrs, 
   checkedWriteRegister(RegIdx::GCONF, gconf.U32, "Failed to restore StealthChop after homing");
 
   if (stalled) {
-    log_info("TMC2209: Stall detected -- homing complete");
+    log_info("%s: Stall detected -- homing complete", name_);
   } else {
-    log_warn("TMC2209: Homing timeout after %lu ms -- no stall detected", (unsigned long)timeoutMs);
+    log_warn("%s: Homing timeout after %lu ms -- no stall detected", name_, (unsigned long)timeoutMs);
   }
   return stalled;
 }
 
 bool TMC2209::StartHomingNonBlocking(int homingSpeedFullStepsPerSecond, uint8_t sgthrs, uint32_t timeoutMs, uint32_t travelOppositeMs, uint32_t homingDeadTimeMs) {
-  log_info("TMC2209: Starting non-blocking sensorless homing (speed=%d full steps/s, sgthrs=%u, timeout=%lu ms)",
+  log_info("%s: Starting non-blocking sensorless homing (speed=%d full steps/s, sgthrs=%u, timeout=%lu ms)", name_,
            homingSpeedFullStepsPerSecond, (unsigned int)sgthrs, (unsigned long)timeoutMs);
 
   if (!EnableCoolStep(/*tcoolthrs=*/450, sgthrs)) {
-    log_error("TMC2209: Failed to enable CoolStep for homing");
+    log_error("%s: Failed to enable CoolStep for homing", name_);
     homing_phase_ = HomingPhase::Idle;
     return false;
   }
@@ -744,7 +792,7 @@ bool TMC2209::StartHomingNonBlocking(int homingSpeedFullStepsPerSecond, uint8_t 
   // Kurz entgegengesetzt anfahren, BEVOR die eigentliche Stall-Suche beginnt -- s.
   // HomeSensorless() fuer die Begruendung.
   if (!GenerateSteps(-homingSpeedFullStepsPerSecond)) {
-    log_error("TMC2209: Failed to start pre-homing opposite travel");
+    log_error("%s: Failed to start pre-homing opposite travel", name_);
     homing_phase_ = HomingPhase::Idle;
     return false;
   }
@@ -775,7 +823,7 @@ TMC2209::HomingResult TMC2209::TickHoming(uint32_t now_ms) {
         return HomingResult::InProgress;
       }
       if (!GenerateSteps(homing_speed_)) {
-        log_error("TMC2209: Failed to start homing motion");
+        log_error("%s: Failed to start homing motion", name_);
         gconf.REG.enable_spread_cycle = 0;
         checkedWriteRegister(RegIdx::GCONF, gconf.U32, "Failed to restore StealthChop after failed homing start");
         homing_phase_ = HomingPhase::Idle;
@@ -791,7 +839,7 @@ TMC2209::HomingResult TMC2209::TickHoming(uint32_t now_ms) {
       if ((now_ms - homing_phase_start_ms_) < homing_dead_time_ms_) {
         return HomingResult::InProgress;
       }
-      log_info("Homing dead time complete, starting stall detection");
+      log_info("%s: Homing dead time complete, starting stall detection", name_);
       homing_phase_ = HomingPhase::StallDetect;
       homing_phase_start_ms_ = now_ms; // ab hier laeuft das Timeout-Fenster
       return HomingResult::InProgress;
@@ -815,10 +863,10 @@ TMC2209::HomingResult TMC2209::TickHoming(uint32_t now_ms) {
       homing_phase_ = HomingPhase::Idle;
 
       if (stalled) {
-        log_info("TMC2209: Stall detected -- homing complete");
+        log_info("%s: Stall detected -- homing complete", name_);
         return HomingResult::Success;
       }
-      log_warn("TMC2209: Homing timeout after %lu ms -- no stall detected", (unsigned long)homing_timeout_ms_);
+      log_warn("%s: Homing timeout after %lu ms -- no stall detected", name_, (unsigned long)homing_timeout_ms_);
       return HomingResult::Timeout;
     }
   }

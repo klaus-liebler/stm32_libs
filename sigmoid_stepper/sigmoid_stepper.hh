@@ -34,6 +34,10 @@ private:
   gpio::Pin step_pin;
   gpio::Pin dir_pin;
   const SigmoidAccelerationProfile *profile;
+  // Kurzer Bezeichner fuer Log-Ausgaben (z.B. "S1 - Sorter"), um bei mehreren
+  // SigmoidStepper-Instanzen unterscheiden zu koennen, welche Achse eine Meldung ausgegeben
+  // hat. Nur gehalten, nicht kopiert -- ein String-Literal an der Instanziierungsstelle reicht.
+  const char *name_;
   bool motion_direction{true};
   MotionPhase motion_phase{MotionPhase::Idle};
   int32_t current_position_{0};
@@ -108,8 +112,9 @@ public:
    * @param dir_pin GPIO pin for direction signal
    */
   SigmoidStepper(gpio::Pin step_pin, gpio::Pin dir_pin,
-                 const SigmoidAccelerationProfile *profile)
-      : step_pin(step_pin), dir_pin(dir_pin), profile(profile),
+                 const SigmoidAccelerationProfile *profile,
+                 const char *name = "SigmoidStepper")
+      : step_pin(step_pin), dir_pin(dir_pin), profile(profile), name_(name),
         motion_direction(true), motion_phase(MotionPhase::Idle),
         current_position_(0), target_position_(0) {}
 
@@ -156,7 +161,7 @@ public:
       motion_phase = MotionPhase::Accel;
     }
     current_arr32 = profile->getLowSpeedARR16() << profile->getShiftBits();
-    log_debug("gotoPosition: delta=%ld steps=%lu phase=%d", delta, static_cast<unsigned long>(steps), static_cast<int>(motion_phase));
+    log_debug("%s: gotoPosition: delta=%ld steps=%lu phase=%d", name_, delta, static_cast<unsigned long>(steps), static_cast<int>(motion_phase));
     start_motion();
   }
 
