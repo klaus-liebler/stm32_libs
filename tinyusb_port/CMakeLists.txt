@@ -1,11 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Duenne CMake-Huelle um das TinyUSB-Submodule (stm32_libs/tinyusb, verschachteltes Submodule
-# auf hathach/tinyusb) -- TinyUSBs eigenes Build-System ist auf deren Beispiel-Projektlayout
+# Duenne CMake-Huelle um das TinyUSB-Submodule (stm32_libs/tinyusb_port/tinyusb, verschachteltes
+# Submodule auf hathach/tinyusb -- bewusst UNTERHALB von tinyusb_port statt als eigenstaendiges
+# Submodule auf oberster stm32_libs-Ebene, da es ausschliesslich von diesem Wrapper-Target
+# konsumiert wird) -- TinyUSBs eigenes Build-System ist auf deren Beispiel-Projektlayout
 # (hw/bsp/<board>) zugeschnitten und passt nicht zu diesem CMake-Projekt, daher hier nur die fuer
 # STM32H5/USB_DRD_FS + Device-CDC/MSC/NCM tatsaechlich benoetigten Quellen von Hand aufgefuehrt
 # (analog zum expliziten Dateilisten-Stil von usb_pd/tmc2209 statt eines GLOBs).
-set(TINYUSB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../tinyusb)
+set(TINYUSB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tinyusb)
 
 add_library(tinyusb_port STATIC
     ${TINYUSB_DIR}/src/tusb.c
