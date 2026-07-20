@@ -111,7 +111,6 @@ public:
   }
 
 void Setup(void) {
-  log_info("Starting SPI HX711 setup");
   // Beim Bringup laut anhalten statt erst per ERROR-Status im laufenden Betrieb zu bemerken,
   // dass gar kein SPI-Handle uebergeben wurde (z.B. HX711<8> mit falschem/nicht initialisiertem
   // Handle instanziiert). Der folgende if-Zweig bleibt fuer den Produktions-/Release-Fall
@@ -127,7 +126,7 @@ void Setup(void) {
   uint8_t dummy_tx[4] = {0};
   HAL_SPI_Transmit(hspi, dummy_tx, 4, HAL_MAX_DELAY);
   this->readout_state = ReadoutState::WAIT_FOR_DATA_READY; // Start in WAIT_FOR_DATA_READY state to begin the measurement cycle
-  log_info("SPI HX711 setup complete including initial dummy read, state machine initialized");
+  log_info("SPI HX711 setup completed successfully.");
 }
 
 void loop(void) {
