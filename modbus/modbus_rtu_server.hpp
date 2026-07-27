@@ -1,24 +1,41 @@
 #pragma once
+#include <cstdint>
+#include <cstddef>
+#include "modbus_commons.hh"
+#include "modbus_register_model.hh"
+#include "common.hh"
+#include "tx_api.h"
 
-// Modbus-RTU-Slave ueber eine TinyUSB-CDC-Schnittstelle (Adress-Byte + CRC16-Framing statt des
+// Modbus-RTU-Slave ueber eine USB-CDC-Schnittstelle (Adress-Byte + CRC16-Framing statt des
 // MBAP-Headers von ModbusTcpServer). FC03/04/06/16 sind bewusst identisch zu ModbusTcpServer, da
 // beide dasselbe Modbus::IModbusRegisterModel binden -- FC01/02/05/15 (Coils) sind NICHT
 // portiert, weil IModbusRegisterModel gar keine Coils kennt (nur Input-/Holding-Register, s.
 // register-map.json) -- exakt dieselbe Einschraenkung wie schon bei ModbusTcpServer.
 //
 // CRC16/Framing-Logik portiert aus der ESP32-Referenz (modbusslave.hh/modbuscommons.hh,
-// C:\repos\espidf-components\modbus_rtu), an dieses Projekt angepasst: Byte-Quelle/-Senke ist
-// tud_cdc_n_read()/tud_cdc_n_write() statt eines UART-Treibers, Registerzugriff laeuft ueber
-// IModbusRegisterModel statt roher std::vector-Zeiger.
-#include <cstdint>
-#include <cstddef>
-#include <cstring>
-#include "modbus_commons.hh"
-#include "modbus_register_model.hh"
-#include "common.hh"
-#include "usbd_device.h"
-#include "tx_api.h"
-
+// C:\repos\espidf-components\modbus_rtu), an dieses Projekt angepasst: Registerzugriff laeuft
+// ueber IModbusRegisterModel statt roher std::vector-Zeiger.
+//
+// Diese Klasse enthaelt bewusst NUR die Protokoll-Logik (Framing/CRC/Register-Zugriff), keine
+// eigene Thread-/USB-IO-Schleife mehr -- die lebt komplett in App::ModbusRtuThread() (app.cc),
+// die auch den Puffer (Buffer()/BufferSize()) und die eigentlichen blockierenden
+// ux_device_class_cdc_acm_read()/_write()-Aufrufe besitzt. ProcessChunk() unten ist die
+// "Einsprungfunktion", die App::ModbusRtuThread() nach jedem neu empfangenen Chunk aufruft --
+// message_length (Bytes einer noch unvollstaendigen Anfrage) und response_length (Bytes einer
+// fertigen Antwort, 0 = keine) sind dafuer der Vertrag. Empfangen und Senden schliessen sich in
+// App::ModbusRtuThread() gegenseitig aus, was fuer Modbus-RTU (strikt Anfrage/Antwort, nie
+// beides gleichzeitig unterwegs) ohnehin passt.
+//
+// Vertrag von ProcessChunk(size_t* message_length, size_t* response_length):
+//  1) Frame (noch) unvollstaendig (z.B. nur der erste USB-Chunk einer Anfrage angekommen):
+//     *message_length/*response_length bleiben unveraendert, der Aufrufer haengt weitere Bytes
+//     ab Buffer()[*message_length] an.
+//  2) Frame weiterhin unvollstaendig UND seit InterFrameTimeoutTicks() keine neuen Bytes (z.B.
+//     beim Hochfahren, wenn nur das Ende einer Anfrage ankam): *message_length=0,
+//     *response_length=0 -- wird NICHT von ProcessChunk() erkannt (die kennt keine Uhrzeit),
+//     sondern vom Aufrufer selbst, der dafuer ProcessChunk() gar nicht erst aufruft.
+//  3) Frame vollstaendig: Antwort wird direkt in Buffer() geschrieben, *message_length=0,
+//     *response_length=Antwortlaenge (>0).
 class ModbusRtuServer {
 public:
     // inter_frame_timeout_ticks: wie lange (ThreadX-Ticks) ohne neue Bytes gewartet wird, bevor
@@ -32,44 +49,29 @@ public:
           m_inter_frame_timeout_ticks(inter_frame_timeout_ticks) {
     }
 
-    // Muss regelmaessig aus dem USB-Device-Thread aufgerufen werden (nicht blockierend). Byte-
-    // Quelle/-Senke laeuft ueber die usbd_cdc_modbus_*()-C-Wrapper (s. usbd_device.h) statt
-    // direkt ueber TinyUSBs tud_cdc_n_*() -- tusb.h selbst darf aus dieser C++-Uebersetzungseinheit
-    // heraus nicht eingebunden werden (s. Klassenkommentar in usbd_device.h).
-    void Poll() {
-        uint32_t avail = usbd_cdc_modbus_available();
-        if (avail == 0) {
-            if (m_rx_pos != 0 && (tx_time_get() - m_rx_last_tick) > m_inter_frame_timeout_ticks) {
-                m_rx_pos = 0;  // angefangener Frame zu lange her -- verwerfen
-            }
-            return;
-        }
+    // Empfangs- UND Sendepuffer zugleich (s. Klassenkommentar) -- Eigentum dieser Klasse, aber
+    // von App::ModbusRtuThread() direkt bei ux_device_class_cdc_acm_read()/_write() als Ziel-
+    // /Quellpuffer benutzt.
+    uint8_t* Buffer() { return m_buf; }
+    uint8_t SlaveId() const { return m_slave_id; }
+    static constexpr size_t BufferSize() { return MAX_ADU_SIZE; }
+    ULONG InterFrameTimeoutTicks() const { return m_inter_frame_timeout_ticks; }
 
-        size_t space = sizeof(m_rx_buf) - m_rx_pos;
-        if (space == 0) {
-            m_rx_pos = 0;  // Ueberlauf-Schutz: Puffer voll, ohne gueltigen Frame -- neu anfangen
-            space = sizeof(m_rx_buf);
-        }
-        uint32_t n = usbd_cdc_modbus_read(m_rx_buf + m_rx_pos, (uint32_t)space);
-        m_rx_pos += n;
-        m_rx_last_tick = tx_time_get();
-
-        uint8_t tx_buf[MAX_ADU_SIZE];
+    // "Einsprungfunktion" des Slaves (s. Klassenkommentar oben fuer den vollstaendigen
+    // Vertrag): arbeitet auf Buffer() (Empfangs- UND Sendepuffer zugleich), die Antwort wird bei
+    // vollstaendigem Frame direkt ueber die bereits verarbeiteten Anfrage-Bytes geschrieben (jede
+    // Process*()-Methode liest alle noetigen Eingabe-Bytes, bevor sie an dieselbe Position etwas
+    // zurueckschreibt -- In-Place ist damit sicher, ohne einen zweiten Puffer zu brauchen).
+    void ProcessChunk(size_t* message_length, size_t* response_length) {
         size_t tx_size = 0;
-        int result = Parse(tx_buf, tx_size);
-
+        int result = Parse(*message_length, tx_size);
         if (result == (int)ParseResult::NOT_YET_COMPLETE) {
-            return;  // weitere Bytes abwarten, m_rx_pos bleibt stehen
+            return;  // Fall 1: weitere Bytes abwarten, *message_length bleibt stehen
         }
-        if (result == (int)ParseResult::OK) {
-            if (tx_size > 0) {
-                usbd_cdc_modbus_write(tx_buf, (uint32_t)tx_size);
-                usbd_cdc_modbus_write_flush();
-            }
-        }
-        // NOT_FOR_ME oder ein Fehler (CRC/Laenge/...): Modbus-RTU-Slaves antworten in beiden
-        // Faellen nicht -- Frame in jedem Fall verwerfen, fertig verarbeitet.
-        m_rx_pos = 0;
+        // Fall 3 (OK) oder Frame verworfen (NOT_FOR_ME/CRC-/Laengenfehler): so oder so ist der
+        // Frame in Buffer() fertig verarbeitet, *message_length faengt wieder bei 0 an.
+        *response_length = (result == (int)ParseResult::OK) ? tx_size : 0;
+        *message_length = 0;
     }
 
 private:
@@ -146,113 +148,122 @@ private:
         return CalcCRC(data, len - 2) == received;
     }
 
-    int Parse(uint8_t* tx_buf, size_t& tx_size) {
-        if (m_rx_pos < 8) {
+    // Arbeitet auf m_buf (Empfangs- UND Sendepuffer, s. ProcessChunk()); rx_len ist die Anzahl
+    // gueltiger, bereits empfangener Bytes darin.
+    int Parse(size_t rx_len, size_t& tx_size) {
+        if (rx_len < 8) {
             return (int)ParseResult::NOT_YET_COMPLETE;  // kuerzeste gueltige Anfrage ist 8 Byte
         }
-        if (m_rx_buf[0] != m_slave_id) {
+        if (m_buf[0] != m_slave_id) {
             return (int)ParseResult::NOT_FOR_ME;
         }
 
-        uint8_t function_code = m_rx_buf[1];
+        uint8_t function_code = m_buf[1];
         switch (function_code) {
-            case 0x03: return ProcessReadRegisters(tx_buf, tx_size, function_code, /*holding=*/true);
-            case 0x04: return ProcessReadRegisters(tx_buf, tx_size, function_code, /*holding=*/false);
-            case 0x06: return ProcessWriteSingleRegister(tx_buf, tx_size);
-            case 0x10: return ProcessWriteMultipleRegisters(tx_buf, tx_size);
-            default:   return BuildExceptionResponse(tx_buf, tx_size, function_code, 0x01);  // Illegal Function
+            case 0x03: return ProcessReadRegisters(rx_len, tx_size, function_code, /*holding=*/true);
+            case 0x04: return ProcessReadRegisters(rx_len, tx_size, function_code, /*holding=*/false);
+            case 0x06: return ProcessWriteSingleRegister(rx_len, tx_size);
+            case 0x10: return ProcessWriteMultipleRegisters(rx_len, tx_size);
+            default:   return BuildExceptionResponse(tx_size, function_code, 0x01);  // Illegal Function
         }
     }
 
-    int ProcessReadRegisters(uint8_t* tx_buf, size_t& tx_size, uint8_t function_code, bool holding) {
-        if (m_rx_pos != 8) return (int)ParseResult::LENGTH_ERROR;
-        if (!ValidCRCInLastTwoBytes(m_rx_buf, m_rx_pos)) return (int)ParseResult::CRC_ERROR;
+    int ProcessReadRegisters(size_t rx_len, size_t& tx_size, uint8_t function_code, bool holding) {
+        if (rx_len != 8) return (int)ParseResult::LENGTH_ERROR;
+        if (!ValidCRCInLastTwoBytes(m_buf, rx_len)) return (int)ParseResult::CRC_ERROR;
 
-        uint16_t start_addr = ParseU16_BigEndian(m_rx_buf, 2);
-        uint16_t quantity = ParseU16_BigEndian(m_rx_buf, 4);
+        // Adresse/Anzahl zuerst vollstaendig auslesen -- die Antwort ueberschreibt m_buf ab Byte
+        // 0 (In-Place, s. Klassenkommentar), die hier gelesenen Bytes 2..5 duerfen also erst
+        // DANACH angefasst werden.
+        uint16_t start_addr = ParseU16_BigEndian(m_buf, 2);
+        uint16_t quantity = ParseU16_BigEndian(m_buf, 4);
         uint16_t max_index = holding ? ModbusRegisters::HOLDING_REGISTER_MAX_INDEX
                                      : ModbusRegisters::INPUT_REGISTER_MAX_INDEX;
         if (quantity == 0 || quantity > 125 || start_addr + quantity > (uint32_t)max_index + 1) {
-            return BuildExceptionResponse(tx_buf, tx_size, function_code, 0x02);  // Illegal Data Address
+            return BuildExceptionResponse(tx_size, function_code, 0x02);  // Illegal Data Address
         }
 
-        tx_buf[0] = m_slave_id;
-        tx_buf[1] = function_code;
-        tx_buf[2] = (uint8_t)(quantity * 2);
+        m_buf[0] = m_slave_id;
+        m_buf[1] = function_code;
+        m_buf[2] = (uint8_t)(quantity * 2);
         size_t offset = 3;
         for (uint16_t i = 0; i < quantity; i++) {
             uint16_t value = holding ? m_registers.GetHoldingRegister(start_addr + i)
                                      : m_registers.GetInputRegister(start_addr + i);
-            tx_buf[offset++] = (uint8_t)(value >> 8);
-            tx_buf[offset++] = (uint8_t)(value & 0xFF);
+            m_buf[offset++] = (uint8_t)(value >> 8);
+            m_buf[offset++] = (uint8_t)(value & 0xFF);
         }
-        WriteCRC(tx_buf, offset);
+        WriteCRC(m_buf, offset);
         tx_size = offset + 2;
         return (int)ParseResult::OK;
     }
 
-    int ProcessWriteSingleRegister(uint8_t* tx_buf, size_t& tx_size) {
-        if (m_rx_pos != 8) return (int)ParseResult::LENGTH_ERROR;
-        if (!ValidCRCInLastTwoBytes(m_rx_buf, m_rx_pos)) return (int)ParseResult::CRC_ERROR;
+    int ProcessWriteSingleRegister(size_t rx_len, size_t& tx_size) {
+        if (rx_len != 8) return (int)ParseResult::LENGTH_ERROR;
+        if (!ValidCRCInLastTwoBytes(m_buf, rx_len)) return (int)ParseResult::CRC_ERROR;
 
-        uint16_t addr = ParseU16_BigEndian(m_rx_buf, 2);
-        uint16_t value = ParseU16_BigEndian(m_rx_buf, 4);
+        uint16_t addr = ParseU16_BigEndian(m_buf, 2);
+        uint16_t value = ParseU16_BigEndian(m_buf, 4);
         if (addr > ModbusRegisters::HOLDING_REGISTER_MAX_INDEX) {
-            return BuildExceptionResponse(tx_buf, tx_size, 0x06, 0x02);
+            return BuildExceptionResponse(tx_size, 0x06, 0x02);
         }
         m_registers.SetHoldingRegister(addr, value);
 
-        // Antwort = Echo der Anfrage (FC06-Konvention)
-        std::memcpy(tx_buf, m_rx_buf, 6);
-        WriteCRC(tx_buf, 6);
+        // Antwort = Echo der Anfrage (FC06-Konvention) -- bereits an Ort und Stelle in m_buf,
+        // nur die CRC muss (mit denselben 6 Bytes) neu geschrieben werden.
+        WriteCRC(m_buf, 6);
         tx_size = 8;
         return (int)ParseResult::OK;
     }
 
-    int ProcessWriteMultipleRegisters(uint8_t* tx_buf, size_t& tx_size) {
-        if (m_rx_pos < 9) return (int)ParseResult::NOT_YET_COMPLETE;
+    int ProcessWriteMultipleRegisters(size_t rx_len, size_t& tx_size) {
+        if (rx_len < 9) return (int)ParseResult::NOT_YET_COMPLETE;
 
-        uint16_t start_addr = ParseU16_BigEndian(m_rx_buf, 2);
-        uint16_t quantity = ParseU16_BigEndian(m_rx_buf, 4);
-        uint8_t byte_count = m_rx_buf[6];
+        uint16_t start_addr = ParseU16_BigEndian(m_buf, 2);
+        uint16_t quantity = ParseU16_BigEndian(m_buf, 4);
+        uint8_t byte_count = m_buf[6];
 
         if (quantity == 0 || quantity > 123 || byte_count != quantity * 2) {
-            return BuildExceptionResponse(tx_buf, tx_size, 0x10, 0x03);  // Illegal Data Value
+            return BuildExceptionResponse(tx_size, 0x10, 0x03);  // Illegal Data Value
         }
 
         size_t necessary_length = 7 + byte_count + 2;  // Header(6)+ByteCount(1) + Daten + CRC(2)
-        if (m_rx_pos < necessary_length) {
+        if (rx_len < necessary_length) {
             return (int)ParseResult::NOT_YET_COMPLETE;
         }
-        if (m_rx_pos > necessary_length) {
+        if (rx_len > necessary_length) {
             return (int)ParseResult::LENGTH_ERROR;
         }
-        if (!ValidCRCInLastTwoBytes(m_rx_buf, m_rx_pos)) {
+        if (!ValidCRCInLastTwoBytes(m_buf, rx_len)) {
             return (int)ParseResult::CRC_ERROR;
         }
         if (start_addr + quantity > (uint32_t)ModbusRegisters::HOLDING_REGISTER_MAX_INDEX + 1) {
-            return BuildExceptionResponse(tx_buf, tx_size, 0x10, 0x02);  // Illegal Data Address
+            return BuildExceptionResponse(tx_size, 0x10, 0x02);  // Illegal Data Address
         }
 
+        // Alle Register-Werte vollstaendig auslesen, BEVOR die Antwort ab Byte 0 in m_buf
+        // hineingeschrieben wird (In-Place, s. Klassenkommentar) -- die Werte liegen ab Byte 7,
+        // die Antwort ist nur 8 Byte lang, ueberschneidet sich also ohnehin nicht, aber die
+        // Reihenfolge (erst lesen, dann schreiben) bleibt auch hier Voraussetzung.
         for (uint16_t i = 0; i < quantity; i++) {
-            uint16_t value = ParseU16_BigEndian(m_rx_buf, 7 + i * 2);
+            uint16_t value = ParseU16_BigEndian(m_buf, 7 + i * 2);
             m_registers.SetHoldingRegister(start_addr + i, value);
         }
 
-        tx_buf[0] = m_slave_id;
-        tx_buf[1] = 0x10;
-        WriteU16_BigEndian(start_addr, tx_buf, 2);
-        WriteU16_BigEndian(quantity, tx_buf, 4);
-        WriteCRC(tx_buf, 6);
+        m_buf[0] = m_slave_id;
+        m_buf[1] = 0x10;
+        WriteU16_BigEndian(start_addr, m_buf, 2);
+        WriteU16_BigEndian(quantity, m_buf, 4);
+        WriteCRC(m_buf, 6);
         tx_size = 8;
         return (int)ParseResult::OK;
     }
 
-    int BuildExceptionResponse(uint8_t* tx_buf, size_t& tx_size, uint8_t function_code, uint8_t exception_code) {
-        tx_buf[0] = m_slave_id;
-        tx_buf[1] = function_code | 0x80;
-        tx_buf[2] = exception_code;
-        WriteCRC(tx_buf, 3);
+    int BuildExceptionResponse(size_t& tx_size, uint8_t function_code, uint8_t exception_code) {
+        m_buf[0] = m_slave_id;
+        m_buf[1] = function_code | 0x80;
+        m_buf[2] = exception_code;
+        WriteCRC(m_buf, 3);
         tx_size = 5;
         return (int)ParseResult::OK;  // Exception-Antworten WERDEN gesendet (anders als CRC-Fehler)
     }
@@ -260,7 +271,7 @@ private:
     uint8_t m_slave_id;
     Modbus::IModbusRegisterModel& m_registers;
     ULONG m_inter_frame_timeout_ticks;
-    uint8_t m_rx_buf[MAX_ADU_SIZE];
-    size_t m_rx_pos = 0;
-    ULONG m_rx_last_tick = 0;
+    // Empfangs- UND Sendepuffer zugleich (s. Klassenkommentar) -- so gross wie die maximale
+    // Modbus-ADU (256 Byte, s. MAX_ADU_SIZE).
+    uint8_t m_buf[MAX_ADU_SIZE];
 };

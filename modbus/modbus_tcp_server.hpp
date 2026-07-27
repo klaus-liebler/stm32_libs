@@ -59,6 +59,8 @@ public:
           m_transaction_id(0), m_is_running(true) {
     }
 
+    uint16_t Port() const { return MODBUS_TCP_PORT; }
+
     // Initialisierung
     void initialize() {
     
