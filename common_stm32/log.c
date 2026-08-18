@@ -12,6 +12,12 @@ static struct {
   bool quiet;
 } L;
 
+static log_ExtraSinkFn extra_sink = NULL;
+
+void log_set_extra_sink(log_ExtraSinkFn fn) {
+  extra_sink = fn;
+}
+
 
 #if defined(LOG_USE_UNICODE)
 static const char *level_strings[] = {
@@ -53,6 +59,22 @@ void log_log(int level, char const* file, int line, char const* fmt, ...) {
   vfprintf(stdout, fmt, ap);
   fprintf(stdout, "\r\n");
   fflush(stdout);
+  if (extra_sink) {
+    // Eigener vsnprintf()-Durchlauf noetig (nicht denselben 'ap' wie oben wiederverwenden --
+    // ein va_list ist nach vfprintf() verbraucht, ein zweiter va_start()/va_copy() ist Pflicht),
+    // um dem Sink den reinen, unformatierten Nachrichtentext ohne Zeitstempel-/Level-Praefix zu
+    // uebergeben (das Praefix ist fuer eine Netzwerk-Senke wie WebSocket-LogMessage irrelevant,
+    // die Zeitstempel/Level bereits selbst im Nachrichtenkopf mitschickt).
+    char buf[256];
+    va_list ap2;
+    va_start(ap2, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap2);
+    va_end(ap2);
+    if (n > 0) {
+      size_t written = (size_t)n >= sizeof(buf) ? sizeof(buf) - 1 : (size_t)n;
+      extra_sink(level, buf, written);
+    }
+  }
   if (L.lock) { L.lock(false); }
   va_end(ap);
 }

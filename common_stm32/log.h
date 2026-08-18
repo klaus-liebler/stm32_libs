@@ -16,6 +16,14 @@
 
 
 typedef void (*log_LockFn)(bool lock);
+// Zusaetzliche, optionale Log-Senke neben der eingebauten stdout/UART-Ausgabe -- bekommt bei
+// jedem log_log()-Aufruf (der den Level-/quiet-Filter passiert) den bereits fertig formatierten
+// Nachrichtentext (ohne Zeitstempel/Level/Datei:Zeile-Praefix, ohne Zeilenumbruch) uebergeben.
+// Bewusst generisch gehalten (kein Wissen ueber Netzwerk/WebSocket/etc. in dieser Bibliothek) --
+// ein aufrufendes Projekt kann hierueber z.B. Logzeilen an verbundene Netzwerk-Clients spiegeln.
+// Wird SYNCHRON und mit gehaltenem log_lock() aufgerufen: muss daher schnell/nicht-blockierend
+// sein und darf selbst keine log_*()-Funktion aufrufen (Deadlock-Gefahr).
+typedef void (*log_ExtraSinkFn)(int level, char const* text, size_t len);
 
 enum { LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL };
 
@@ -30,6 +38,7 @@ void log_log(int level, char const* file, int line, char const* fmt, ...);
 void log_set_lock(log_LockFn);
 void log_set_level(int level);
 void log_set_quiet(bool enable);
+void log_set_extra_sink(log_ExtraSinkFn fn);
 
 #ifdef __cplusplus
 }
