@@ -62,7 +62,14 @@ void log_set_quiet(bool enable) {
 // von '...' (anders als im alten log_log(), das direkt in der variadischen Funktion stand).
 static void log_write_line(int level, char const* file, int line, bool with_prefix, char const* fmt, va_list ap) {
   if (with_prefix) {
-    fprintf(stdout, "\x1b[0m%6lu\x1b[0m %s%s\x1b[0m \x1b[90m%-8.8s:%03d:\x1b[0m ", (unsigned long)HAL_GetTick(), level_colors[level], level_strings[level], file, line);
+    // Ab 100000 (>99999, also ab 100s Laufzeit) auf Sekunden umschalten (letzte drei Stellen/ms
+    // weglassen) -- haelt die Tick-Spalte trotz wachsender Laufzeit in der 6-stelligen Breite
+    // lesbar, statt irgendwann ueber die Spaltenbreite hinauszuwachsen.
+    unsigned long tick = (unsigned long)HAL_GetTick();
+    if (tick > 99999UL) {
+      tick /= 1000UL;
+    }
+    fprintf(stdout, "\x1b[0m%6lu\x1b[0m %s%s\x1b[0m \x1b[90m%-8.8s:%03d:\x1b[0m ", tick, level_colors[level], level_strings[level], file, line);
   } else {
     fprintf(stdout, "%*s", LOG_PREFIX_WIDTH, "");
   }
