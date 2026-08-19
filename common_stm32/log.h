@@ -34,7 +34,23 @@ enum { LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL };
 #define log_error(...) log_log(LOG_ERROR, __FILE_NAME__, __LINE__, __VA_ARGS__)
 #define log_fatal(...) log_log(LOG_FATAL, __FILE_NAME__, __LINE__, __VA_ARGS__)
 
+// Mehrzeiliger Block (ML = multi-line): fuer Ausgaben, die logisch zusammengehoeren (Boot-Banner,
+// I2C-Scan-Ergebnisse) und nicht durch die Log-Zeile eines anderen Threads durchmischt werden
+// duerfen. LOG_INFO_ML(...) druckt die erste Zeile MIT dem ueblichen Praefix (Zeitstempel/Level/
+// Datei:Zeile) und haelt danach das Log-Lock offen; LOG_ML(...) druckt beliebig viele
+// Folgezeilen OHNE Praefix, nur eingerueckt; LOG_ML_END() (ohne Parameter) druckt eine
+// abschliessende Leerzeile und gibt das Lock wieder frei. LOG_ML()/LOG_ML_END() ohne
+// vorausgehendes LOG_INFO_ML() sind No-ops, kein Absturz. Nicht verschachteln (ein zweites
+// LOG_INFO_ML() vom selben Thread ohne vorheriges LOG_ML_END() schliesst den alten Block
+// automatisch, s. log.c) -- fuer Details/Einschraenkungen s. log_log_ml_begin() in log.c.
+#define LOG_INFO_ML(...) log_log_ml_begin(LOG_INFO, __FILE_NAME__, __LINE__, __VA_ARGS__)
+#define LOG_ML(...) log_log_ml(__VA_ARGS__)
+#define LOG_ML_END() log_log_ml_end()
+
 void log_log(int level, char const* file, int line, char const* fmt, ...);
+void log_log_ml_begin(int level, char const* file, int line, char const* fmt, ...);
+void log_log_ml(char const* fmt, ...);
+void log_log_ml_end(void);
 void log_set_lock(log_LockFn);
 void log_set_level(int level);
 void log_set_quiet(bool enable);
