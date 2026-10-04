@@ -39,9 +39,17 @@ struct TaskScheduler {
      * @brief Schedules a task to be executed at a time in the future.
      * 
      * @param task task to execute
-     * @param time time, in µs, same base as `micros()`
+     * @param time time, in µs, same base as `now()`
      */
     void scheduleTaskAt(TaskFunction task, uint32_t time);
+
+    /**
+     * @brief Current time, in µs, wrapping around after 2^32 µs.
+     *
+     * Derived from the ThreadX tick plus SysTick's position within the
+     * current tick -- requires a running ThreadX kernel.
+     */
+    static uint32_t now();
 
     /**
      * @brief Cancels the execution of a previously scheduled task.

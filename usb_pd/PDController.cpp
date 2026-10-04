@@ -50,7 +50,7 @@ const PDLogEntry* PDController::popLogEntry() {
 void PDController::log(PDLogEntryType type, const PDMessage* message) {
     uint32_t index = logHead % LogSize;
     logEntries[index].type = type;
-    logEntries[index].time = micros();
+    logEntries[index].time = TaskScheduler::now();
     logEntries[index].message = message;
     logHead += 1;
 }

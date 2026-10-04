@@ -230,23 +230,19 @@ uint32_t ParseU32_BigEndian(const uint8_t *const buffer, size_t offset)
 }
 
 
-// DWT cycle counter based - deliberately independent of SysTick/HAL_GetTick().
-// The previous implementation interpolated between HAL_GetTick() and SysTick->VAL,
-// which is only valid if SysTick itself is the HAL tick source. Under an RTOS
-// (e.g. ThreadX) that claims SysTick for its own scheduler tick and moves the HAL
-// tick to a different timer, HAL_GetTick() and SysTick run independently and the
-// interpolation returns garbage. DWT->CYCCNT free-runs off the core clock
-// regardless of what SysTick or the HAL tick timer are doing.
-uint32_t micros(void)
+// Enables the DWT cycle counter (DWT->CYCCNT), a free-running counter at core clock
+// that other code uses as a time base (e.g. a DWT-based HAL_GetTick() before the RTOS
+// starts, or per-thread CPU-time statistics).
+// Call exactly once, as the very first statement in main() -- before HAL_Init() and
+// SystemClock_Config(), whose timeouts may already rely on a DWT-based HAL_GetTick().
+// CYCCNT is reset here (the DWT is in the debug domain and survives a system reset,
+// e.g. one triggered by the debugger), so it must never be called again later: zeroing
+// it would make that clock jump backwards and break any running timeout.
+extern "C" void enable_dwt_cycle_counter(void)
 {
-  static uint32_t ticks_per_us = 0;
-  if (ticks_per_us == 0) {
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CYCCNT = 0;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-    ticks_per_us = SystemCoreClock / 1000000U;
-  }
-  return DWT->CYCCNT / ticks_per_us;
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 }
 
 

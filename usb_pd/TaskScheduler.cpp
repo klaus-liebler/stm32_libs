@@ -5,6 +5,7 @@
 #include "hal_header_selector.h"
 #include "common.hh"
 #include "hw_config_assert.hh"
+#include "tx_api.h"
 //#define USE_TIMER6_FOR_SCHEDULER
 #define USE_TIMER7_FOR_SCHEDULER
 
@@ -36,6 +37,37 @@ static uint32_t getTimerClockHz() {
         pclk1 *= 2;
 #endif
     return pclk1;
+}
+
+// Zeitbasis in us aus dem ThreadX-Tick (SysTick, TX_TIMER_TICKS_PER_SECOND) plus der Position
+// innerhalb des laufenden Ticks (SysTick->VAL zaehlt von LOAD auf 0 herunter). Ersetzt das
+// fruehere DWT-basierte micros(): dieses lief schon nach 2^32 Takten (~27s bei 160MHz) ueber,
+// nicht nach 2^32 us -- die Wrap-Arithmetik unten (timeDifference/hasExpired) setzt aber einen
+// vollen 32-Bit-us-Zaehler voraus. Hier wird ticks * us_per_tick in uint32_t gerechnet und
+// laeuft damit exakt modulo 2^32 us (~71 min) ueber, lueckenlos auch ueber den Ueberlauf von
+// tx_time_get() hinweg. Setzt einen laufenden ThreadX-Kernel voraus (vor tx_kernel_enter() steht
+// tx_time_get() auf 0) -- der Scheduler wird erst danach gestartet (s. USBPDControl::Start()).
+uint32_t TaskScheduler::now() {
+    constexpr uint32_t us_per_tick = 1000000UL / TX_TIMER_TICKS_PER_SECOND;
+    const uint32_t cycles_per_us = SystemCoreClock / 1000000UL;
+
+    // Unter gesperrten Interrupts, damit Tick-Zaehler und SysTick->VAL zusammenpassen. Ist der
+    // SysTick bereits uebergelaufen, sein Interrupt aber noch nicht abgearbeitet (PENDSTSET --
+    // z.B. weil dieser Code selbst im hoeher priorisierten UCPD-/TIM7-Interrupt laeuft), hinkt
+    // tx_time_get() um einen Tick hinterher: dann den Tick selbst mitzaehlen und VAL neu lesen
+    // (ein erstes VAL kann noch von vor dem Ueberlauf stammen).
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    uint32_t ticks = (uint32_t)tx_time_get();
+    uint32_t val = SysTick->VAL;
+    if ((SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0U) {
+        ticks += 1U;
+        val = SysTick->VAL;
+    }
+    const uint32_t load = SysTick->LOAD;
+    __set_PRIMASK(primask);
+
+    return ticks * us_per_tick + (load - val) / cycles_per_us;
 }
 
 inline static uint32_t timeDifference(uint32_t time, uint32_t now) {
@@ -81,7 +113,7 @@ void TaskScheduler::start() {
 }
 
 void TaskScheduler::scheduleTaskAfter(TaskFunction task, uint32_t delay) {
-    scheduleTaskAt(task, micros() + delay);
+    scheduleTaskAt(task, now() + delay);
 }
 
 void TaskScheduler::scheduleTaskAt(TaskFunction task, uint32_t time) {
@@ -96,7 +128,7 @@ void TaskScheduler::scheduleTaskAt(TaskFunction task, uint32_t time) {
 
     // pause timer
     SCHEDULER_TIMER->CR1 &= ~TIM_CR1_CEN_Msk;
-    uint32_t now = micros();
+    uint32_t now = TaskScheduler::now();
 
     // find insertion index
     // (tasks are sorted by time but time wraps around)
@@ -167,7 +199,7 @@ void TaskScheduler::checkPendingTasks() {
         if (numScheduledTasks == 0)
             return; // no pending tasks
 
-        now = micros();
+        now = TaskScheduler::now();
         if (!hasExpired(scheduledItems[0].time, now))
             break; // next task has not yet expired
 
@@ -184,7 +216,7 @@ void TaskScheduler::checkPendingTasks() {
         task();
     }
 
-    uint32_t delayToFirstTask = timeDifference(scheduledItems[0].time, micros());
+    uint32_t delayToFirstTask = timeDifference(scheduledItems[0].time, TaskScheduler::now());
     //log_info("Delay to next first task %d", delayToFirstTask);
     if (delayToFirstTask > 0xffff)
         delayToFirstTask = 0xffff;

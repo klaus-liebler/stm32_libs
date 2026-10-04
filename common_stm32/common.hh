@@ -110,4 +110,5 @@ void WriteU32_BigEndian(uint32_t value, uint8_t *buffer, size_t offset);
 uint16_t ParseU16_BigEndian(const uint8_t *const buffer, size_t offset);
 uint32_t ParseU32_BigEndian(const uint8_t *const buffer, size_t offset);
 
-uint32_t micros();
+// Enables DWT->CYCCNT; call exactly once at the very start of main() (see common.cc).
+extern "C" void enable_dwt_cycle_counter(void);
